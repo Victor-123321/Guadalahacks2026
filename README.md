@@ -11,7 +11,7 @@
 
 ## ¿Qué es Ardo?
 
-Ardo es un asistente de voz de código abierto diseñado para usuarios en silla de ruedas y personas con movilidad reducida. Escucha la wake-word **"Hey Ardo"**, procesa el comando de voz y controla dispositivos del hogar — luces, puertas, robot aspiradora — sin necesidad de manos.
+Ardo es un asistente de voz de código abierto diseñado directamente en el dispositivo. Escucha la wake-word **"Hey Ardo"**, procesa el comando de voz y controla dispositivos IoT como luces, puertas, robot aspiradora, sin necesidad de manos.
 
 ---
 
