@@ -1,14 +1,14 @@
 """
-voice_listener.py — Escucha continua del micrófono con VAD de energía.
-Flujo: mic → VAD → WAV en memoria → Whisper en red → texto transcripto.
+voice_listener.py — Grabación push-to-talk + transcripción Whisper en red.
+Flujo: botón presionado → graba → botón soltado → WAV a Whisper → texto.
 Servidor STT: http://192.168.12.1:6767/v1/audio/transcriptions
 """
 
 import io
 import json
 import logging
+import threading
 import wave
-from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -28,45 +28,56 @@ def _load_stt_url() -> str:
         return "http://192.168.12.1:6767/v1/audio/transcriptions"
 
 
-STT_URL          = _load_stt_url()
-SAMPLE_RATE      = 16_000   # Hz — Whisper espera 16 kHz
-CHANNELS         = 1
-BLOCK_FRAMES     = 1_024    # ~64 ms por bloque
-ENERGY_THRESH    = 400      # RMS mínimo int16 para considerar voz
-PRE_ROLL_BLOCKS  = 6        # Bloques guardados antes de detectar voz (~0.4 s)
-SILENCE_BLOCKS   = 14       # Bloques de silencio para cerrar segmento (~0.9 s)
-MIN_SPEECH_BLOCKS = 8       # Segmento mínimo válido (~0.5 s)
+STT_URL      = _load_stt_url()
+SAMPLE_RATE  = 16_000
+CHANNELS     = 1
+BLOCK_FRAMES = 1_024   # ~64 ms por bloque
 
 
 class VoiceListener(QThread):
     """
-    Hilo que captura el micrófono continuamente.
-    Cuando detecta voz, graba el segmento y lo manda al servidor Whisper.
+    Hilo de captura push-to-talk.
+    start_recording() → graba mientras esté activo → stop_recording() → envía a Whisper.
     """
 
     transcription_ready = pyqtSignal(str)   # texto transcripto listo
-    state_changed       = pyqtSignal(str)   # "escuchando" | "grabando" | "procesando" | "error"
-    error_occurred      = pyqtSignal(str)   # mensaje de error no fatal
-    barge_in            = pyqtSignal()      # voz detectada → interrumpir TTS
+    state_changed       = pyqtSignal(str)   # "listo" | "grabando" | "procesando"
+    error_occurred      = pyqtSignal(str)   # error no fatal
+    barge_in            = pyqtSignal()      # inicio de grabación → interrumpir TTS
 
     def __init__(self, stt_url: str = STT_URL, parent=None):
         super().__init__(parent)
-        self._url    = stt_url
-        self._active = True
-        self._muted  = False
+        self._url          = stt_url
+        self._active       = True
+        self._recording    = False
+        self._frames: list = []
+        self._lock         = threading.Lock()
 
-    # ── Control externo ────────────────────────────────────────────────────────
+    # ── Control externo (llamado desde el hilo Qt principal) ───────────────────
+    def start_recording(self):
+        with self._lock:
+            self._frames    = []
+            self._recording = True
+        self.barge_in.emit()
+        self.state_changed.emit("grabando")
+        _log.debug("PTT: inicio de grabación")
+
+    def stop_recording(self):
+        with self._lock:
+            self._recording = False
+            frames = list(self._frames)
+            self._frames = []
+        self.state_changed.emit("procesando")
+        _log.debug("PTT: fin de grabación — %d bloques", len(frames))
+        if frames:
+            threading.Thread(target=self._transcribe, args=(frames,), daemon=True).start()
+        else:
+            self.state_changed.emit("listo")
+
     def stop_listening(self):
         self._active = False
 
-    def set_muted(self, muted: bool):
-        self._muted = muted
-
-    def toggle_mute(self) -> bool:
-        self._muted = not self._muted
-        return self._muted
-
-    # ── Hilo principal ─────────────────────────────────────────────────────────
+    # ── Hilo principal: mantiene el stream de micrófono abierto ───────────────
     def run(self):
         try:
             import sounddevice as sd
@@ -74,14 +85,8 @@ class VoiceListener(QThread):
             self.error_occurred.emit("sounddevice no instalado: pip install sounddevice")
             return
 
-        pre_roll     = deque(maxlen=PRE_ROLL_BLOCKS)
-        recording    = []
-        silence_cnt  = 0
-        speech_cnt   = 0
-        is_recording = False
-
-        self.state_changed.emit("escuchando")
-        _log.info("VoiceListener activo — STT: %s", self._url)
+        self.state_changed.emit("listo")
+        _log.info("VoiceListener PTT activo — STT: %s", self._url)
 
         try:
             with sd.InputStream(
@@ -92,53 +97,21 @@ class VoiceListener(QThread):
             ) as stream:
                 while self._active:
                     block, _ = stream.read(BLOCK_FRAMES)
-
-                    if self._muted:
-                        continue
-
-                    rms      = float(np.sqrt(np.mean(block.astype(np.float32) ** 2)))
-                    is_voice = rms > ENERGY_THRESH
-
-                    if not is_recording:
-                        pre_roll.append(block.copy())
-                        if is_voice:
-                            is_recording = True
-                            silence_cnt  = 0
-                            speech_cnt   = 1
-                            recording    = list(pre_roll)
-                            self.barge_in.emit()            # interrumpe TTS si está hablando
-                            self.state_changed.emit("grabando")
-                    else:
-                        recording.append(block.copy())
-                        if is_voice:
-                            speech_cnt += 1
-                            silence_cnt = 0
-                        else:
-                            silence_cnt += 1
-                            if silence_cnt >= SILENCE_BLOCKS:
-                                if speech_cnt >= MIN_SPEECH_BLOCKS:
-                                    self._transcribe(recording)
-                                # Reiniciar estado
-                                recording    = []
-                                is_recording = False
-                                silence_cnt  = 0
-                                speech_cnt   = 0
-                                self.state_changed.emit("escuchando")
-
+                    with self._lock:
+                        if self._recording:
+                            self._frames.append(block.copy())
         except Exception as e:
             _log.error("VoiceListener error: %s", e)
             self.error_occurred.emit(f"Error de micrófono: {e}")
 
     # ── Envío a Whisper ────────────────────────────────────────────────────────
     def _transcribe(self, frames: list):
-        self.state_changed.emit("procesando")
         try:
             audio = np.concatenate(frames, axis=0)
-
-            buf = io.BytesIO()
+            buf   = io.BytesIO()
             with wave.open(buf, "wb") as wf:
                 wf.setnchannels(CHANNELS)
-                wf.setsampwidth(2)          # int16 = 2 bytes
+                wf.setsampwidth(2)
                 wf.setframerate(SAMPLE_RATE)
                 wf.writeframes(audio.tobytes())
             buf.seek(0)
@@ -149,7 +122,6 @@ class VoiceListener(QThread):
                 data={"task": "transcribe", "language": "es"},
                 timeout=20,
             )
-
             if r.status_code == 200:
                 text = r.json().get("text", "").strip()
                 if text:
@@ -158,11 +130,10 @@ class VoiceListener(QThread):
             else:
                 _log.warning("STT %s: %s", r.status_code, r.text[:80])
                 self.error_occurred.emit(f"Whisper error {r.status_code}")
-
         except requests.exceptions.ConnectionError:
-            self.error_occurred.emit(f"Sin conexión al servidor STT ({self._url})")
+            self.error_occurred.emit(f"Sin conexión STT ({self._url})")
         except Exception as e:
             _log.error("STT excepción: %s", e)
             self.error_occurred.emit(f"Error STT: {e}")
         finally:
-            self.state_changed.emit("escuchando")
+            self.state_changed.emit("listo")

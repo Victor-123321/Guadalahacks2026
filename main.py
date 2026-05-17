@@ -815,11 +815,11 @@ class ArdoDesktopWindow(QMainWindow):
         self.mic_btn.setFixedSize(42, 42)
         self.mic_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.mic_btn.setFont(QFont("Segoe UI", 16))
-        self.mic_btn.setToolTip("Activar / silenciar micrófono")
+        self.mic_btn.setToolTip("Mantén presionado para hablar")
         self.mic_btn.setCheckable(True)
-        self.mic_btn.setChecked(True)
-        self._apply_mic_style(active=True)
-        self.mic_btn.clicked.connect(self._on_mic_toggle)
+        self._apply_mic_style(active=False)
+        self.mic_btn.pressed.connect(self._on_mic_press)
+        self.mic_btn.released.connect(self._on_mic_release)
 
         row1 = QHBoxLayout(); row1.setSpacing(10)
         row1.addWidget(self.mic_btn)
@@ -929,6 +929,9 @@ class ArdoDesktopWindow(QMainWindow):
     # ── Voz ────────────────────────────────────────────────────────────────────
     def _on_voice_transcription(self, text: str):
         """Texto llegado del STT → entra al pipeline como si el usuario lo hubiera escrito."""
+        if "chinga tu madre" in text.lower():
+            QApplication.quit()
+            return
         self.input_field.setText(text)
         self._process_command(text)
 
@@ -936,11 +939,12 @@ class ArdoDesktopWindow(QMainWindow):
         """Actualiza UI según el estado del micrófono."""
         if state == "grabando":
             self.face.set_state("pensando")
-            self._set_status("Escuchando voz…", C["teal"])
-            self._sidebar_badges.get("stt") and self._sidebar_badges["stt"].setText("REC")
+            self._set_status("Grabando voz…", C["teal"])
+            b = self._sidebar_badges.get("stt")
+            if b: b.setText("REC")
         elif state == "procesando":
             self._set_status("Transcribiendo…", C["warning"])
-        elif state == "escuchando":
+        elif state == "listo":
             self._set_status("Listo", C["online"])
             b = self._sidebar_badges.get("stt")
             if b and b.text() == "REC":
@@ -949,9 +953,13 @@ class ArdoDesktopWindow(QMainWindow):
     def _on_voice_error(self, error: str):
         log_error(f"[STT] {error}")
 
-    def _on_mic_toggle(self):
-        muted = self._voice.toggle_mute()
-        self._apply_mic_style(active=not muted)
+    def _on_mic_press(self):
+        self._apply_mic_style(active=True)
+        self._voice.start_recording()
+
+    def _on_mic_release(self):
+        self._apply_mic_style(active=False)
+        self._voice.stop_recording()
 
     def _apply_mic_style(self, active: bool):
         if not hasattr(self, "mic_btn"):
