@@ -1,216 +1,121 @@
-# Guadalahacks 2026 — Ardo v2
+# Guadalahacks 2026 - Ardo v2
 
-> **Asistente de domótica por voz para personas con discapacidad motriz**
+> Asistente de domotica por voz para personas con discapacidad motriz
 
-[![ESP32-S3](https://img.shields.io/badge/ESP32--S3-ESP--IDF-blue?logo=espressif)](https://docs.espressif.com/projects/esp-idf/)
-[![Python](https://img.shields.io/badge/Python-3.10+-green?logo=python)](https://python.org)
-[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024-41BDF5?logo=homeassistant)](https://www.home-assistant.io/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
+## Que es Ardo
 
----
-
-## ¿Qué es Ardo?
-
-Ardo es un asistente de voz de código abierto diseñado directamente en el dispositivo. Escucha la wake-word **"Hey Ardo"**, procesa el comando de voz y controla dispositivos IoT como luces, puertas, robot aspiradora, sin necesidad de manos.
-
----
-
-## Arquitectura
-
-```
-  ┌─────────────────────────────────────────────────┐
-  │                  PC  (ardopc)                   │
-  │  faster-whisper ──► Home Assistant ──► Kokoro   │
-  │  FastAPI :8080          :8123          TTS       │
-  └───────────────┬─────────────────────────────────┘
-                  │ TCP :9000 (audio stream)
-                  │ HTTP /ping  (turbo check)
-                  │
-  ┌───────────────▼──────────┐   UART   ┌───────────────────────┐
-  │  ESP1 — Oido + Boca      │ ◄──────► │  ESP2 — Cerebro+Motor │
-  │  ESP32-S3                │          │  ESP32-S3             │
-  │  · INMP441 (I2S mic)     │          │  · TinyNLU 12 intents │
-  │  · MAX98357A (speaker)   │          │  · GPIO LEDs simulados│
-  │  · ESP-SR AFE + VAD      │          │  · Auto door-close 8s │
-  │  · Wake-word TFLM        │          └───────────────────────┘
-  └──────────────────────────┘
-```
-
-### Modo Turbo (Wi-Fi disponible)
-`Mic → AFE → TCP stream → faster-whisper → HA conversation API → Kokoro TTS → Speaker`
-
-### Modo Local (sin servidor)
-`Mic → Energy classifier (5 ventanas RMS) → UART → TinyNLU → GPIO simulado`
-
----
+Ardo es un asistente de voz de codigo abierto para controlar dispositivos IoT como luces, puertas, persianas y robot aspiradora. El proyecto combina firmware para ESP32-S3 con una app de escritorio local para pruebas y demostraciones.
 
 ## Estructura del repositorio
 
-```
+```text
 ardo_v2/
-├── esp1_oido_boca/          # ESP32-S3: micrófono, wake-word, Wi-Fi, altavoz
-│   ├── platformio.ini
-│   ├── partitions.csv
-│   ├── sdkconfig.defaults
-│   └── src/
-│       ├── main.cpp
-│       ├── CMakeLists.txt
-│       ├── idf_component.yml
-│       ├── hey_ardo_model.h    ← (añadir manualmente)
-│       └── hey_ardo_model.cc   ← (añadir manualmente)
-│
-├── esp2_cerebro_motor/      # ESP32-S3: NLU + actuadores simulados
-│   ├── platformio.ini
-│   └── src/
-│       ├── main.cpp
-│       ├── tiny_nlu.h
-│       ├── tiny_nlu.cpp
-│       ├── CMakeLists.txt
-│       └── idf_component.yml
-│
-└── server/
-    ├── ardo_v2_server.py    # FastAPI + TCP + STT + HA + TTS
-    └── requirements.txt
+|-- esp1_oido_boca/          # ESP32-S3: microfono, wake-word, Wi-Fi, altavoz
+|-- esp2_cerebro_motor/      # ESP32-S3: NLU + actuadores simulados
+`-- server/                  # Servidor FastAPI + TCP + STT + HA + TTS
+
+main.py                      # App de escritorio local
+tiny_nlu_provider.py         # NLU local de la app
+tts.py                       # Voz local con Kokoro
 ```
 
----
+## App de escritorio local
 
-## Hardware
+La app de escritorio en `main.py` permite probar Ardo sin hardware.
 
-| Componente | Cant. | Notas |
-|---|---|---|
-| ESP32-S3-DevKitC-1 | 2 | 8 MB OPI PSRAM |
-| INMP441 (micrófono I2S) | 1 | → ESP1 |
-| MAX98357A + bocina | 1 | → ESP1 |
-| PC con GPU (opcional) | 1 | faster-whisper + HA VM |
-| LEDs + resistencias 330Ω | 6+ | actuadores simulados en ESP2 |
+### Requisitos
 
-### Pines ESP1
+- Windows
+- Python 3.10, 3.11 o 3.12
+- Un entorno virtual del proyecto
 
-| Señal | GPIO |
-|---|---|
-| I2S MCLK (mic) | 2 |
-| I2S WS (mic) | 9 |
-| I2S DATA (mic) | 13 |
-| I2S BCLK (speaker) | 4 |
-| I2S LRCK (speaker) | 5 |
-| I2S DATA (speaker) | 6 |
-| WS2812 LED | 48 |
-| UART TX → ESP2 | 17 |
-| UART RX ← ESP2 | 16 |
+> Kokoro `0.9.x` no es compatible con Python 3.13.
 
-### Pines ESP2
+### Instalacion rapida
 
-| Señal | GPIO |
-|---|---|
-| UART RX ← ESP1 | 16 |
-| UART TX → ESP1 | 17 |
-| LED luz principal | 1 |
-| LED luz recámara | 2 |
-| LED puerta principal | 3 |
-| LED puerta trasera | 4 |
-| LED robot aspiradora | 5 |
-| LED emergencia | 6 |
-| WS2812 LED | 48 |
-
----
-
-## Protocolo TCP (Turbo)
-
-```
-ESP1 → Servidor
-  "ARDO_AUD1"  (9 bytes magic)
-  <PCM int16 LE 16 kHz mono>
-  "ARDO_END1"  (9 bytes magic)
-
-Servidor → ESP1
-  "KOKO_AUD1"  (9 bytes magic)
-  <uint32 LE length>
-  <PCM int16 LE 16 kHz mono>  ← Kokoro TTS resampled
+```powershell
+py -3.12 -m venv .venv
+.venv\Scripts\activate
+python -m pip install --upgrade pip
+pip install -r requirements_gui.txt
+pip install "kokoro>=0.9.4" soundfile numpy pygame
 ```
 
-## Protocolo UART (Local)
+La primera vez, Kokoro descarga sus pesos y la voz configurada en `tts.py`. Despues puede funcionar offline.
 
-```
-ESP1 → ESP2:  CMD:<texto>\n
-ESP2 → ESP1:  RESP:<respuesta>\n
+### Ejecutar
+
+```powershell
+.venv\Scripts\activate
+python main.py
 ```
 
----
+Ejemplos de comandos:
+
+```text
+enciende la luz del cuarto
+apaga todas las luces
+abre la cerradura
+cierra las persianas
+```
+
+La app usa:
+
+- `tiny_nlu_provider.py` para clasificar comandos locales
+- `tts.py` para sintetizar voz con Kokoro
+- `main.py` para la interfaz y la reproduccion de audio
+
+### Voz local con Kokoro
+
+`tts.py` carga Kokoro con `lang_code="e"` para espanol y usa por defecto la voz `em_alex`.
+
+Para cambiar la voz:
+
+```python
+ArdoTTS(voice="ef_dora")
+```
+
+La salida se normaliza y se guarda a `44.1 kHz` para mejorar la compatibilidad de reproduccion en Windows.
 
 ## Intents TinyNLU
 
-| Intent | Target | Ejemplo |
-|---|---|---|
-| LIGHT_ON / LIGHT_OFF | light_main, light_bed | "enciende la luz" |
-| DOOR_OPEN / DOOR_CLOSE | door_main, door_back | "abre la puerta" |
-| TV_ON / TV_OFF | tv | "enciende la televisión" |
-| CURTAIN_OPEN / CURTAIN_CLOSE | curtain | "abre las cortinas" |
-| ROBOT_START / ROBOT_STOP | robot_vacuum | "pon a limpiar el robot" |
-| THERMOSTAT | thermostat | "sube la temperatura" |
-| EMERGENCY | all | "emergencia" (+2.0 boost) |
+| Intent | Ejemplo |
+|---|---|
+| `LIGHT_ON` / `LIGHT_OFF` | `enciende la luz del cuarto` |
+| `DOOR_OPEN` / `DOOR_CLOSE` | `abre la cerradura` |
+| `CURTAIN_OPEN` / `CURTAIN_CLOSE` | `cierra las persianas` |
+| `ROBOT_START` / `ROBOT_STOP` | `pon a limpiar el robot` |
+| `TV_ON` / `TV_OFF` | `enciende la television` |
+| `EMERGENCY` | `ayuda` |
 
----
-
-## Instalación del servidor
+## Servidor
 
 ```bash
-# Instalar dependencias
 pip install -r ardo_v2/server/requirements.txt
-
-# Instalar UN backend TTS
-pip install kokoro          # recomendado
-# pip install kokoro-onnx   # alternativa ligera
-
-# Token de Home Assistant (perfil → Tokens de acceso de larga duración)
-export HA_TOKEN="tu_token_aqui"
-
-# Ejecutar
 python ardo_v2/server/ardo_v2_server.py
-# HTTP :8080  →  GET /ping
-# TCP  :9000  →  stream de audio desde ESP1
 ```
 
----
-
-## Build y flash de los firmwares
+## Build y flash de firmwares
 
 ```bash
-# ESP1
 cd ardo_v2/esp1_oido_boca
-# Editar src/main.cpp: WIFI_SSID, WIFI_PASS, SERVER_IP
 pio run -t upload
-pio device monitor
 
-# ESP2
-cd ardo_v2/esp2_cerebro_motor
+cd ../esp2_cerebro_motor
 pio run -t upload
-pio device monitor
 ```
 
-> **Requisito:** añadir `hey_ardo_model.h` y `hey_ardo_model.cc` (modelo de wake-word entrenado) en `esp1_oido_boca/src/` antes de compilar.
+## Archivos locales que no se suben
 
----
+El `.gitignore` excluye automaticamente:
 
-## Stack tecnológico
-
-- **ESP-IDF 5.x** vía PlatformIO — firmware production-grade
-- **ESP-SR AFE** — Audio Front End con VAD, AGC y supresión de ruido
-- **TensorFlow Lite Micro** — inferencia de wake-word en el borde
-- **faster-whisper** — STT acelerado por GPU (fallback a CPU)
-- **Home Assistant** — plataforma de automatización en VM local
-- **Kokoro TTS** — síntesis de voz de alta calidad
-- **FastAPI + asyncio** — servidor Python con HTTP y TCP concurrentes
-- **FreeRTOS** — tareas pinned a cores, EventGroups, semáforos
-
----
-
-## Documentación completa
-
-Ver [`ardo_v2/README_Ardo_v2.pdf`](ardo_v2/README_Ardo_v2.pdf) para la documentación detallada con diagramas, troubleshooting y referencia de todos los parámetros.
-
----
+- `.venv/`
+- `__pycache__/`
+- `logs/`
+- `memoria.json`
+- archivos de audio generados como `*.wav` y `*.mp3`
+- caches locales
 
 ## Licencia
 
-MIT © 2026 — Guadalahacks
+MIT - 2026 Guadalahacks

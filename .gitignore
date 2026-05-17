@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local runtime data
+logs/
+*.log
+memoria.json
+datos.local.json
+
+# Audio / temporary generated files
+*.wav
+*.mp3
+
+# Local model/cache artifacts
+.cache/
+cache/
+
+# Tooling / editor noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Python test / build artifacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/

@@ -30,6 +30,7 @@ from utils import Logger, log_info, log_error
 import datos
 from memoria import MemoriaManager
 from tools import ToolManager
+from tts import ArdoTTS
 
 logger = Logger()
 
@@ -379,39 +380,34 @@ class FaceWidget(QFrame):
 # ─── Voz ──────────────────────────────────────────────────────────────────────
 class VoiceEngine:
     def __init__(self):
-        self._enabled = False; self._lock = threading.Lock(); self._engine = None
-        for eng, test in [("edge", "import edge_tts, pygame; pygame.mixer.init()"),
-                          ("gtts", "from gtts import gTTS; import pygame; pygame.mixer.init()")]:
-            try: exec(test); self._engine = eng; break
-            except ImportError: pass
+        self._enabled = True
+        self._lock = threading.Lock()
+        self._tts = None
+        try:
+            self._tts = ArdoTTS()
+        except Exception as e:
+            log_error(f"VoiceEngine Kokoro init: {e}")
 
     def speak(self, text: str):
-        if not self._enabled or not self._engine: return
-        clean = re.sub(r'[^\w\s,.!?áéíóúüñ`]', '', text, flags=re.UNICODE).strip()[:300]
+        if not self._enabled or not self._tts: return
+        clean = re.sub(r'[^\w\s,.!?áéíóúüñ¿¡`]', '', text, flags=re.UNICODE).strip()[:300]
         if clean: threading.Thread(target=self._run, args=(clean,), daemon=True).start()
 
     def _run(self, text):
         with self._lock:
             try:
-                if self._engine == "edge":
-                    import asyncio, edge_tts, pygame, tempfile
-                    async def _s():
-                        c = edge_tts.Communicate(text, voice="es-MX-DaliaNeural")
-                        t = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False); t.close()
-                        await c.save(t.name); return t.name
-                    p = asyncio.run(_s()); pygame.mixer.music.load(p); pygame.mixer.music.play()
-                    while pygame.mixer.music.get_busy(): threading.Event().wait(0.1)
-                    os.unlink(p)
-                else:
-                    from gtts import gTTS; import pygame
-                    fp = io.BytesIO(); gTTS(text, lang="es").write_to_fp(fp); fp.seek(0)
-                    pygame.mixer.music.load(fp); pygame.mixer.music.play()
-                    while pygame.mixer.music.get_busy(): threading.Event().wait(0.1)
-            except Exception: pass
+                import tempfile, winsound
+                tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                tmp.close()
+                self._tts.generate_to_file(text, tmp.name)
+                winsound.PlaySound(tmp.name, winsound.SND_FILENAME)
+                os.unlink(tmp.name)
+            except Exception as e:
+                log_error(f"VoiceEngine Kokoro speak: {e}")
 
     def toggle(self) -> bool: self._enabled = not self._enabled; return self._enabled
     @property
-    def available(self): return self._engine is not None
+    def available(self): return self._tts is not None
 
 # ─── AI Worker ────────────────────────────────────────────────────────────────
 class AIWorker(QThread):
@@ -803,6 +799,7 @@ class ArdoDesktopWindow(QMainWindow):
             self.face.set_state("ejecutando", ms=4000)
             self._set_status("Listo", C["online"])
             self._info_lbl.setText(tool.mensaje)
+            self.voice.speak(tool.mensaje)
             self.stack.setCurrentIndex(1)
             self._idle_timer.start()
             self.input_field.setEnabled(True)

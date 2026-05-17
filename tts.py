@@ -28,6 +28,18 @@ class ArdoTTS:
 
         if audio_chunks:
             audio_completo = np.concatenate(audio_chunks)
-            sf.write(output_path, audio_completo, 24000)
+            peak = np.max(np.abs(audio_completo))
+            if peak > 0:
+                audio_completo = audio_completo / peak * 0.9
+            # Kokoro genera a 24 kHz; remuestreamos a 44.1 kHz para una
+            # reproduccion mas consistente en Windows.
+            source_rate = 24000
+            target_rate = 44100
+            if source_rate != target_rate:
+                old_x = np.linspace(0, 1, num=len(audio_completo), endpoint=False)
+                new_len = int(len(audio_completo) * target_rate / source_rate)
+                new_x = np.linspace(0, 1, num=new_len, endpoint=False)
+                audio_completo = np.interp(new_x, old_x, audio_completo)
+            sf.write(output_path, audio_completo, target_rate)
         else:
             print("[TTS] Error: Kokoro no pudo generar audio.")

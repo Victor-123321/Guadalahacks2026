@@ -163,6 +163,41 @@ def nlu_process(text: str) -> dict:
         if "sube" in low or "abre" in low:
             scores["CURTAIN_OPEN"] = scores.get("CURTAIN_OPEN", 0) + 1.0
 
+    # El objeto mencionado debe mandar sobre verbos ambiguos como abre/cierra.
+    has_light = any(k in low for k in ("luz", "luces", "foco", "focos", "lampara", "lamparas", "lámpara", "lámparas"))
+    has_curtain = any(k in low for k in ("cortina", "cortinas", "persiana", "persianas"))
+    has_door = any(k in low for k in ("puerta", "puertas", "cerradura", "cerraduras"))
+
+    if has_light:
+        scores["DOOR_OPEN"] = 0.0
+        scores["DOOR_CLOSE"] = 0.0
+        scores["CURTAIN_OPEN"] = 0.0
+        scores["CURTAIN_CLOSE"] = 0.0
+        if any(k in low for k in ("enciende", "encender", "prende", "prender", "ilumina")):
+            scores["LIGHT_ON"] = max(scores.get("LIGHT_ON", 0.0), 2.5)
+        if any(k in low for k in ("apaga", "apagar", "oscuro")):
+            scores["LIGHT_OFF"] = max(scores.get("LIGHT_OFF", 0.0), 2.5)
+
+    if has_curtain:
+        scores["DOOR_OPEN"] = 0.0
+        scores["DOOR_CLOSE"] = 0.0
+        scores["LIGHT_ON"] = 0.0
+        scores["LIGHT_OFF"] = 0.0
+        if any(k in low for k in ("sube", "abre", "abrir")):
+            scores["CURTAIN_OPEN"] = max(scores.get("CURTAIN_OPEN", 0.0), 2.5)
+        if any(k in low for k in ("baja", "cierra", "cerrar")):
+            scores["CURTAIN_CLOSE"] = max(scores.get("CURTAIN_CLOSE", 0.0), 2.5)
+
+    if has_door:
+        scores["CURTAIN_OPEN"] = 0.0
+        scores["CURTAIN_CLOSE"] = 0.0
+        scores["LIGHT_ON"] = 0.0
+        scores["LIGHT_OFF"] = 0.0
+        if any(k in low for k in ("abre", "abrir", "abrela", "destrab", "desbloquea")):
+            scores["DOOR_OPEN"] = max(scores.get("DOOR_OPEN", 0.0), 2.5)
+        if any(k in low for k in ("cierra", "cerrar", "ciérrala", "traba", "bloquea")):
+            scores["DOOR_CLOSE"] = max(scores.get("DOOR_CLOSE", 0.0), 2.5)
+
     best, best_score = "UNKNOWN", 0.2
     for intent, score in scores.items():
         if score > best_score:
