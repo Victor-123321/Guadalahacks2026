@@ -1,0 +1,215 @@
+
+esphome:
+  name: ardo-assistant
+  friendly_name: Ardo_Assistant
+  includes:
+    - usb_audio_stream.h
+  on_boot:
+    priority: 800
+    then:
+      - delay: 2s
+      - lambda: |-
+          init_usb_stream();
+          id(ardo_mic).start();
+          id(ardo_ai).start();
+      - light.turn_on:
+          id: led_status
+          brightness: 100%
+          red: 0%
+          green: 0%
+          blue: 0%
+
+esp32:
+  board: esp32-s3-devkitc-1
+  flash_size: 16MB
+  partitions: partitions.csv
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_ESPTOOLPY_FLASHMODE_QIO: "y"
+      CONFIG_ESPTOOLPY_FLASHSIZE_16MB: "y"
+      CONFIG_SPIRAM: "y"
+      CONFIG_SPIRAM_MODE_OCT: "y"
+      CONFIG_SPIRAM_SPEED_80M: "y"
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "y"
+      CONFIG_SPIRAM_RODATA: "y"
+      CONFIG_ESP32S3_SPIRAM_SUPPORT: "y"
+      CONFIG_SPIRAM_USE_MALLOC: "y"
+
+logger:
+  # Ojo: Mantenemos USB_SERIAL_JTAG, el puente en C++ y el script 
+  # de Python se encargan de separar los logs del audio binario.
+  hardware_uart: USB_SERIAL_JTAG
+  level: INFO
+
+# Aunque mandamos audio por USB, dejamos el WiFi para ver logs remotos o subir OTAs
+wifi:
+  ssid: "Ardo"
+  password: "ardi2siempre"
+  ap:
+    ssid: "Ardo_Net"
+    channel: 6
+  reboot_timeout: 0s
+  power_save_mode: NONE
+
+api:
+
+ota:
+  - platform: esphome
+    password: ""
+
+# ── Globals ───────────────────────────────────────────────────────────────────
+globals:
+  - id: is_streaming
+    type: bool
+    initial_value: 'false'
+
+  - id: silence_timer
+    type: int
+    initial_value: '0'
+
+  - id: total_stream_time
+    type: int
+    initial_value: '0'
+
+  - id: voice_detected
+    type: bool
+    initial_value: 'false'
+
+# ── LED ───────────────────────────────────────────────────────────────────────
+light:
+  - platform: esp32_rmt_led_strip
+    id: led_status
+    pin: GPIO48
+    num_leds: 1
+    rgb_order: GRB
+    chipset: WS2812
+
+# ── I2S Micrófono ─────────────────────────────────────────────────────────────
+i2s_audio:
+  - id: i2s_mic_bus
+    i2s_lrclk_pin: GPIO9
+    i2s_bclk_pin: GPIO2
+
+microphone:
+  - platform: i2s_audio
+    id: ardo_mic
+    i2s_audio_id: i2s_mic_bus
+    i2s_din_pin: GPIO13
+    adc_type: external
+    pdm: false
+    sample_rate: 16000
+    bits_per_sample: 32bit
+    channel: left
+    on_data:
+      lambda: |-
+        if (x.size() < 4) return;
+
+        size_t num_samples = x.size() / 4;
+        int32_t sum = 0;
+        std::vector<uint8_t> pcm16;
+
+        // MULTIPLICADOR DE VOLUMEN (Ganancia x20)
+        const int GAIN = 20; 
+
+        for (size_t i = 0; i < num_samples; i++) {
+            // Reconstruir los 32 bits originales
+            int32_t raw = (int32_t)((x[i*4+3] << 24) | (x[i*4+2] << 16) |
+                                    (x[i*4+1] << 8)  |  x[i*4]);
+            
+            // Extraer los 16 bits más significativos y amplificar
+            int32_t sample32 = (raw >> 16) * GAIN; 
+            
+            // Limitar (clipping) para evitar ruidos extraños (distorsión digital)
+            if (sample32 > 32767) sample32 = 32767;
+            if (sample32 < -32768) sample32 = -32768;
+            
+            int16_t sample = (int16_t)sample32;
+            sum += abs(sample);
+
+            if (id(is_streaming)) {
+                pcm16.push_back(sample & 0xFF);
+                pcm16.push_back((sample >> 8) & 0xFF);
+            }
+        }
+        
+        int32_t avg = (num_samples > 0) ? sum / num_samples : 0;
+
+        // ── Lógica de Streaming y VAD Inteligente ──
+        if (id(is_streaming)) {
+            static int log_cnt = 0;
+            if (log_cnt++ % 5 == 0) {
+                ESP_LOGI("VAD", "Nivel de voz (Amplificado): %d", avg);
+            }
+
+            // Enviar audio crudo al puente USB
+            send_usb_audio(pcm16.data(), pcm16.size());
+
+            int ms_passed = (num_samples * 1000) / 16000;
+            id(total_stream_time) += ms_passed;
+
+            // Umbral en 300 (gracias a la ganancia x20, esto detectará tu voz fácil)
+            if (avg > 300) { 
+                id(voice_detected) = true;
+                id(silence_timer) = 0; 
+            } else {
+                id(silence_timer) += ms_passed; 
+            }
+
+            bool timeout_con_voz = id(voice_detected) && (id(silence_timer) > 1500);
+            bool timeout_sin_voz = !id(voice_detected) && (id(total_stream_time) > 4000);
+            bool timeout_maximo = id(total_stream_time) > 10000; 
+
+            if (timeout_con_voz || timeout_sin_voz || timeout_maximo) {
+                id(is_streaming) = false;
+                
+                // Manda la señal 0x02 por USB para que Python sepa que ya terminaste
+                stop_usb_stream();
+                
+                if (timeout_con_voz) ESP_LOGI("ARDO", "VAD: Frase terminada. Cortando audio.");
+                else if (timeout_sin_voz) ESP_LOGW("ARDO", "VAD: Abortado. El usuario no dijo nada.");
+                else ESP_LOGW("ARDO", "VAD: Corte por tiempo máximo (10s).");
+
+                auto call = id(led_status).make_call();
+                call.set_brightness(1.0f);
+                call.set_rgb(0.0f, 0.0f, 0.0f); // Apagar LED
+                call.perform();
+
+                id(ardo_ai).start(); // Volver a activar la detección de "Hey Ardo"
+            }
+        }
+
+# ── Micro Wake Word ───────────────────────────────────────────────────────────
+micro_wake_word:
+  id: ardo_ai
+  microphone: ardo_mic
+
+  # Filtro para ignorar ruidos constantes y solo reaccionar a voz
+  vad:
+    model: github://esphome/micro-wake-word-models/models/v2/vad.json@main
+
+  models:
+    - model: https://raw.githubusercontent.com/Sesgaro/Hey_ardo_mww/main/hey_ardo.json
+      probability_cutoff: 85%
+      sliding_window_size: 10
+
+  on_wake_word_detected:
+    - micro_wake_word.stop:
+    - globals.set:
+        id: is_streaming
+        value: 'true'
+    - globals.set:
+        id: silence_timer
+        value: '0'
+    - globals.set:
+        id: total_stream_time
+        value: '0'
+    - globals.set:
+        id: voice_detected
+        value: 'false'
+    - lambda: |-
+        ESP_LOGI("ARDO", "*** HEY ARDO DETECTADO *** -> Iniciando transmisión USB");
+        auto call = id(led_status).make_call();
+        call.set_brightness(1.0f);
+        call.set_rgb(0.0f, 1.0f, 0.0f); // LED Verde intenso
+        call.perform();
