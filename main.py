@@ -32,6 +32,7 @@ from memoria import MemoriaManager
 from tools import ToolManager
 from tts import ArdoTTS
 from voice_listener import VoiceListener
+from ha_watcher import HAWatcher
 
 logger = Logger()
 
@@ -469,6 +470,16 @@ class ArdoDesktopWindow(QMainWindow):
             DeviceState(d.id, d.name, d.location, d.dtype, d.icon, d.state, d.value)
             for d in INITIAL_DEVICES
         ]
+        # Aplicar último estado conocido desde caché HA antes de construir la UI
+        try:
+            import json as _json
+            from pathlib import Path as _Path
+            _cache = _json.loads((_Path(__file__).parent / "ha_states_cache.json").read_text("utf-8"))
+            for _dev in self.devices:
+                if _dev.id in _cache:
+                    _dev.state = _cache[_dev.id]
+        except Exception:
+            pass
         self.recent: List[RecentCmd] = []
         self._latency_ms: float = 0.0
         self._ai_worker = None
@@ -480,6 +491,16 @@ class ArdoDesktopWindow(QMainWindow):
         self._idle_timer.start()
         # Verificar conectividad a Ollama, HA y STT tras 2 s
         QTimer.singleShot(2000, self._check_connections)
+        # Sincronización en tiempo real con Home Assistant
+        self._ha_watcher = HAWatcher()
+        self._ha_watcher.states_updated.connect(self._on_ha_states)
+        self._ha_watcher.connected.connect(
+            lambda ok: self._apply_connection_status(
+                self.ai.ollama_available(), ok
+            )
+        )
+        self._ha_watcher.start()
+
         # Arrancar escucha de micrófono
         self._voice = VoiceListener()
         self._voice.transcription_ready.connect(self._on_voice_transcription)
@@ -978,6 +999,19 @@ class ArdoDesktopWindow(QMainWindow):
                 f"border:1px solid {C['border']};border-radius:21px;}}"
                 f"QPushButton:hover{{background:{C['border2']};color:{C['text']};}}"
             )
+
+    def _on_ha_states(self, states: dict):
+        """Recibe {device_id: bool} de HAWatcher y actualiza la UI en tiempo real."""
+        changed = False
+        for dev in self.devices:
+            if dev.id in states:
+                new_state = states[dev.id]
+                if dev.state != new_state:
+                    dev.state = new_state
+                    changed = True
+        if changed:
+            self._refresh_device_cards()
+            self._update_status_panel()
 
     def _execute_ha_command(self, intent: str, target: str):
         """Llama al HA bridge en un hilo de fondo para no bloquear la UI."""
