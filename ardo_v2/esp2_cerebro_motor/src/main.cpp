@@ -28,6 +28,7 @@
 #include "esp_heap_caps.h"
 #include "driver/gpio.h"
 #include "driver/uart.h"
+#include "driver/usb_serial_jtag.h"
 #include "led_strip.h"
 
 #include "tiny_nlu.h"
@@ -35,9 +36,11 @@
 static const char* TAG = "ARDO2";
 
 // ─── Pines ────────────────────────────────────────────────────────────────────
+// UART1 = ESP1 (producción), UART0 = consola USB (pruebas)
 #define UART_PORT     UART_NUM_1
 #define UART_RX_PIN   GPIO_NUM_16   // ← conectar al TX de ESP1
 #define UART_TX_PIN   GPIO_NUM_17   // ← conectar al RX de ESP1
+#define UART_CONSOLE  UART_NUM_0    // ← monitor USB (ttyACM0)
 #define LED_PIN       48
 
 // Actuadores simulados: LEDs que representan estados de dispositivos
@@ -73,6 +76,7 @@ static home_state_t s_home = {};
 static led_strip_handle_t s_led = nullptr;
 
 static void led_set(uint8_t r, uint8_t g, uint8_t b) {
+    if (!s_led) return;
     led_strip_set_pixel(s_led, 0, r, g, b);
     led_strip_refresh(s_led);
 }
@@ -83,7 +87,12 @@ static void init_led() {
     cfg.max_leds              = 1;
     led_strip_rmt_config_t rm = {};
     rm.resolution_hz          = 10000000;
-    led_strip_new_rmt_device(&cfg, &rm, &s_led);
+    esp_err_t err = led_strip_new_rmt_device(&cfg, &rm, &s_led);
+    if (err != ESP_OK || s_led == nullptr) {
+        ESP_LOGW(TAG, "LED strip init falló (err=0x%x) — continuando sin LED", err);
+        s_led = nullptr;
+        return;
+    }
     led_strip_clear(s_led);
     led_set(10, 0, 10);  // magenta = esperando
 }
@@ -111,15 +120,14 @@ static void init_actuator_pins() {
 
 // ─── Init UART ────────────────────────────────────────────────────────────────
 static void init_uart() {
-    uart_config_t cfg = {
-        .baud_rate           = UART_BAUD,
-        .data_bits           = UART_DATA_8_BITS,
-        .parity              = UART_PARITY_DISABLE,
-        .stop_bits           = UART_STOP_BITS_1,
-        .flow_ctrl           = UART_HW_FLOWCTRL_DISABLE,
-        .rx_flow_ctrl_thresh = 122,
-        .source_clk          = UART_SCLK_DEFAULT,
-    };
+    uart_config_t cfg = {};
+    cfg.baud_rate           = UART_BAUD;
+    cfg.data_bits           = UART_DATA_8_BITS;
+    cfg.parity              = UART_PARITY_DISABLE;
+    cfg.stop_bits           = UART_STOP_BITS_1;
+    cfg.flow_ctrl           = UART_HW_FLOWCTRL_DISABLE;
+    cfg.rx_flow_ctrl_thresh = 122;
+    cfg.source_clk          = UART_SCLK_DEFAULT;
     uart_param_config(UART_PORT, &cfg);
     uart_set_pin(UART_PORT, UART_TX_PIN, UART_RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     uart_driver_install(UART_PORT, UART_BUF_SIZE, UART_BUF_SIZE, 0, nullptr, 0);
@@ -341,8 +349,68 @@ static void nlu_task(void* arg) {
     }
 }
 
+// ─── Tarea: Consola de prueba via USB Serial/JTAG ────────────────────────────
+// /dev/ttyACM0 en el PC conecta al periférico USB Serial/JTAG del ESP32-S3,
+// que es hardware separado de UART0. Se lee con usb_serial_jtag_read_bytes.
+// Acepta texto libre O con prefijo "CMD:".
+// Ejemplos: "enciende la luz"  "abre la puerta"  "mueve el robot"
+static void console_task(void* arg) {
+    usb_serial_jtag_driver_config_t usj_cfg = {};
+    usj_cfg.rx_buffer_size = 512;
+    usj_cfg.tx_buffer_size = 512;
+    esp_err_t err = usb_serial_jtag_driver_install(&usj_cfg);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "USB Serial/JTAG driver ya instalado o error (0x%x)", err);
+    }
+    ESP_LOGI(TAG, "=== CONSOLA USB: escribe un comando + Enter ===");
+
+    uint8_t raw[512];
+    char    line[256];
+    int     pos = 0;
+
+    while (true) {
+        int len = usb_serial_jtag_read_bytes(raw, sizeof(raw) - 1,
+                                             pdMS_TO_TICKS(50));
+        for (int i = 0; i < len; i++) {
+            char c = (char)raw[i];
+            if (c == '\r') continue;
+            if (c == '\n' || pos >= (int)sizeof(line) - 2) {
+                line[pos] = '\0';
+                pos = 0;
+                if (strlen(line) == 0) continue;
+
+                // Acepta texto directo O con prefijo "CMD:"
+                const char* text = (strncmp(line, UART_CMD_PREFIX,
+                                            strlen(UART_CMD_PREFIX)) == 0)
+                                    ? line + strlen(UART_CMD_PREFIX)
+                                    : line;
+
+                ESP_LOGI(TAG, ">>> Procesando: '%s'", text);
+                led_set(0, 100, 255);
+
+                nlu_result_t result = {};
+                nlu_process(text, &result);
+
+                ESP_LOGI(TAG, "NLU → intent=%s  target=%d  conf=%.2f",
+                         nlu_intent_name(result.intent),
+                         (int)result.target, result.confidence);
+                ESP_LOGI(TAG, "JSON  → %s", result.json);
+                ESP_LOGI(TAG, "RESP  → %s", result.response);
+
+                execute_command(&result);
+            } else {
+                line[pos++] = c;
+            }
+        }
+    }
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 extern "C" void app_main() {
+    // Delay para que USB Serial/JTAG tenga tiempo de enumerarse
+    // antes de que aparezcan logs importantes
+    vTaskDelay(pdMS_TO_TICKS(3000));
+
     ESP_LOGI(TAG, "=== Ardo v2 — ESP2 Cerebro+Motor | ESP32-S3 ===");
     ESP_LOGI(TAG, "RAM libre: %d bytes", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 
@@ -355,7 +423,8 @@ extern "C" void app_main() {
     led_set(10, 0, 10);  // magenta = idle, esperando
 
     // La tarea principal de NLU/ejecución corre en Core 0
-    xTaskCreatePinnedToCore(nlu_task, "nlu", 8192, nullptr, 5, nullptr, 0);
+    xTaskCreatePinnedToCore(nlu_task,     "nlu",     8192, nullptr, 5, nullptr, 0);
+    xTaskCreatePinnedToCore(console_task, "console", 4096, nullptr, 3, nullptr, 0);
 
     // app_main puede terminar — FreeRTOS seguirá corriendo
 }

@@ -49,6 +49,11 @@
 #include "esp_afe_sr_models.h"
 
 // ─── Configuración de Usuario ─────────────────────────────────────────────────
+// Modo standalone: sin WiFi, sin ESP2 — solo prueba de wake word
+#define STANDALONE_TEST     1                       // ← 1 = sin WiFi, 0 = normal
+// Modo texto: deshabilita mic/wake word, solo consola → UART1 → ESP2
+#define TEXT_ONLY_TEST      1                       // ← 1 = solo texto, 0 = con mic
+
 #define WIFI_SSID           "TU_RED_WIFI"          // ← CAMBIAR
 #define WIFI_PASSWORD       "TU_PASSWORD_WIFI"      // ← CAMBIAR
 #define PC_HOST             "ardopc"                // hostname o IP de la PC
@@ -269,9 +274,14 @@ static void wifi_event_handler(void* arg, esp_event_base_t base,
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+#if !STANDALONE_TEST
         ESP_LOGW(TAG, "WiFi desconectado — reintentando...");
         xEventGroupClearBits(s_evt, EVT_WIFI_CONNECTED);
         esp_wifi_connect();
+#else
+        ESP_LOGW(TAG, "WiFi no disponible (STANDALONE_TEST — sin reintentos)");
+        xEventGroupClearBits(s_evt, EVT_WIFI_CONNECTED);
+#endif
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* ev = (ip_event_got_ip_t*)data;
         ESP_LOGI(TAG, "WiFi OK — IP: " IPSTR, IP2STR(&ev->ip_info.ip));
@@ -306,15 +316,14 @@ static void init_wifi() {
 
 // ─── Init UART (para ESP2) ────────────────────────────────────────────────────
 static void init_uart() {
-    uart_config_t cfg = {
-        .baud_rate           = UART_BAUD,
-        .data_bits           = UART_DATA_8_BITS,
-        .parity              = UART_PARITY_DISABLE,
-        .stop_bits           = UART_STOP_BITS_1,
-        .flow_ctrl           = UART_HW_FLOWCTRL_DISABLE,
-        .rx_flow_ctrl_thresh = 122,
-        .source_clk          = UART_SCLK_DEFAULT,
-    };
+    uart_config_t cfg = {};          // zero-init todo el struct (incluye flags anidado)
+    cfg.baud_rate           = UART_BAUD;
+    cfg.data_bits           = UART_DATA_8_BITS;
+    cfg.parity              = UART_PARITY_DISABLE;
+    cfg.stop_bits           = UART_STOP_BITS_1;
+    cfg.flow_ctrl           = UART_HW_FLOWCTRL_DISABLE;
+    cfg.rx_flow_ctrl_thresh = 122;
+    cfg.source_clk          = UART_SCLK_DEFAULT;
     uart_param_config(UART_PORT, &cfg);
     uart_set_pin(UART_PORT, UART_TX, UART_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     uart_driver_install(UART_PORT, UART_BUF_SIZE, UART_BUF_SIZE, 0, nullptr, 0);
@@ -349,8 +358,8 @@ static int tcp_connect(int port) {
     int sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
     if (sock < 0) { freeaddrinfo(res); return -1; }
 
-    struct timeval tv_s = {.tv_sec = TCP_SEND_TIMEOUT_MS / 1000};
-    struct timeval tv_r = {.tv_sec = TCP_RECV_TIMEOUT_MS / 1000};
+    struct timeval tv_s = {.tv_sec = TCP_SEND_TIMEOUT_MS / 1000, .tv_usec = 0};
+    struct timeval tv_r = {.tv_sec = TCP_RECV_TIMEOUT_MS / 1000, .tv_usec = 0};
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv_s, sizeof(tv_s));
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv_r, sizeof(tv_r));
 
@@ -588,24 +597,40 @@ static void wakeword_task(void* arg) {
     float in_scale           = (inp->params.scale == 0.0f) ? 1.0f : inp->params.scale;
 
     int8_t* spec_history = (int8_t*)heap_caps_calloc(inp->bytes, 1, MALLOC_CAP_SPIRAM);
-    if (!spec_history) { ESP_LOGE(TAG, "Sin PSRAM"); vTaskDelete(nullptr); return; }
+    if (!spec_history) {
+        ESP_LOGW(TAG, "Sin PSRAM — spec_history en RAM interna (%d bytes)", (int)inp->bytes);
+        spec_history = (int8_t*)heap_caps_calloc(inp->bytes, 1, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+    if (!spec_history) { ESP_LOGE(TAG, "Sin memoria para spec_history"); vTaskDelete(nullptr); return; }
 
-    int     feed_size  = s_afe_handle->get_feed_chunksize(s_afe_data);
-    int     fetch_size = s_afe_handle->get_fetch_chunksize(s_afe_data);
-    int16_t* afe_buf   = (int16_t*)heap_caps_malloc(feed_size * 2, MALLOC_CAP_INTERNAL);
     int16_t* pcm_block = (int16_t*)heap_caps_malloc(I2S_BLOCK_BYTES, MALLOC_CAP_INTERNAL);
-    if (!afe_buf || !pcm_block) { vTaskDelete(nullptr); return; }
+    if (!pcm_block) { vTaskDelete(nullptr); return; }
 
-    // Buffer de captura post-WW (PSRAM — ~2.5s de audio AFE procesado)
-    const int  MAX_CAPTURE_SAMPLES = fetch_size * CMD_CAPTURE_FRAMES;
-    int16_t*   capture_buf = (int16_t*)heap_caps_malloc(
+#if !STANDALONE_TEST
+    int      feed_size  = s_afe_handle->get_feed_chunksize(s_afe_data);
+    int      fetch_size = s_afe_handle->get_fetch_chunksize(s_afe_data);
+    int16_t* afe_buf    = (int16_t*)heap_caps_malloc(feed_size * 2, MALLOC_CAP_INTERNAL);
+    if (!afe_buf) { vTaskDelete(nullptr); return; }
+    const int MAX_CAPTURE_SAMPLES = fetch_size * CMD_CAPTURE_FRAMES;
+#else
+    const int MAX_CAPTURE_SAMPLES = I2S_BLOCK_SAMPLES * CMD_CAPTURE_FRAMES;
+#endif
+
+    int16_t* capture_buf = (int16_t*)heap_caps_malloc(
         MAX_CAPTURE_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM);
-    int        capture_idx = 0;
-    if (!capture_buf) ESP_LOGW(TAG, "Sin PSRAM para captura — fallback limitado");
+    int capture_idx = 0;
+    if (!capture_buf) {
+        ESP_LOGW(TAG, "Sin PSRAM — capture_buf en RAM interna (reducido)");
+        capture_buf = (int16_t*)heap_caps_malloc(
+            (MAX_CAPTURE_SAMPLES / 2) * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (!capture_buf) ESP_LOGW(TAG, "Sin memoria para capture_buf — clasificación omitida");
+    }
 
     SlidingWindow sw;
     sw_reset(&sw);
+#if !STANDALONE_TEST
     int afe_written = 0;
+#endif
 
     bool    cooldown     = false;
     int64_t cooldown_end = 0;
@@ -632,6 +657,76 @@ static void wakeword_task(void* arg) {
 
         if (xQueueReceive(s_i2s_queue, pcm_block, portMAX_DELAY) != pdTRUE) continue;
 
+#if STANDALONE_TEST
+        // ── Camino directo: PCM crudo → Microfrontend → TFLM (sin AFE) ──────
+        if (s_state == STATE_IDLE) {
+            size_t used;
+            struct FrontendOutput fe = FrontendProcessSamples(
+                &s_fe_state, pcm_block, I2S_BLOCK_SAMPLES, &used);
+            if (!fe.values || fe.size != NUM_MEL_CHANNELS) continue;
+
+            int8_t frame[NUM_MEL_CHANNELS];
+            for (int i = 0; i < NUM_MEL_CHANNELS; i++) {
+                float   fv = (float)fe.values[i] / 26.0f;
+                int32_t qv = (int32_t)roundf(fv / in_scale) + inp->params.zero_point;
+                frame[i]   = (int8_t)((qv > 127) ? 127 : (qv < -128) ? -128 : qv);
+            }
+            memmove(spec_history, spec_history + NUM_MEL_CHANNELS,
+                    inp->bytes - NUM_MEL_CHANNELS);
+            memcpy(spec_history + inp->bytes - NUM_MEL_CHANNELS, frame, NUM_MEL_CHANNELS);
+            memcpy(inp->data.int8, spec_history, inp->bytes);
+
+            if (interp.Invoke() != kTfLiteOk) continue;
+            int8_t raw = out->data.int8[wake_class];
+            float  prob = (float)(raw - out_zp) * out_scale;
+            if (prob < 0.0f) prob = 0.0f;
+            float  avg  = sw_push(&sw, prob);
+
+            if (avg >= PROBABILITY_CUTOFF) {
+                ESP_LOGW(TAG, "*** HEY ARDO! avg=%.3f ***", avg);
+                led_set(0, 200, 0);
+                xSemaphoreTake(s_state_mux, portMAX_DELAY);
+                s_state = STATE_WW_DETECTED;
+                xSemaphoreGive(s_state_mux);
+                sw_reset(&sw);
+                capture_idx = 0;
+
+                // Captura post-WW sin AFE (~2.5s de PCM crudo)
+                led_set(200, 80, 0);
+                xSemaphoreTake(s_state_mux, portMAX_DELAY);
+                s_state = STATE_LOCAL_CAPTURE;
+                xSemaphoreGive(s_state_mux);
+
+                for (int fn = 0; fn < CMD_CAPTURE_FRAMES; fn++) {
+                    if (xQueueReceive(s_i2s_queue, pcm_block, pdMS_TO_TICKS(50)) != pdTRUE) break;
+                    if (capture_buf && capture_idx + I2S_BLOCK_SAMPLES <= MAX_CAPTURE_SAMPLES) {
+                        memcpy(capture_buf + capture_idx, pcm_block, I2S_BLOCK_BYTES);
+                        capture_idx += I2S_BLOCK_SAMPLES;
+                    }
+                }
+
+                local_intent_t intent = LOCAL_INTENT_UNKNOWN;
+                if (capture_buf && capture_idx > 0)
+                    intent = classify_local_intent(capture_buf, capture_idx);
+
+                const char* cmd_text = (intent < LOCAL_INTENT_UNKNOWN)
+                    ? LOCAL_INTENT_CMDS[intent] : "comando desconocido";
+                ESP_LOGI(TAG, "Intent local: [%d] '%s'", (int)intent, cmd_text);
+
+                char uart_msg[160];
+                snprintf(uart_msg, sizeof(uart_msg), "%s%s\n", UART_CMD_PREFIX, cmd_text);
+                uart_write_bytes(UART_PORT, uart_msg, strlen(uart_msg));
+
+                cooldown     = true;
+                cooldown_end = (int64_t)xTaskGetTickCount() * portTICK_PERIOD_MS + COOLDOWN_MS;
+                xSemaphoreTake(s_state_mux, portMAX_DELAY);
+                s_state = STATE_COOLDOWN;
+                xSemaphoreGive(s_state_mux);
+                sw_reset(&sw);
+                led_set(0, 0, 5);
+            }
+        }
+#else
         // ── Rellenar buffer AFE ───────────────────────────────────────────────
         int rem = I2S_BLOCK_SAMPLES, src = 0;
         while (rem > 0) {
@@ -707,7 +802,6 @@ static void wakeword_task(void* arg) {
                         bool  stream_done    = false;
 
                         while (!stream_done && total_frames < CMD_CAPTURE_FRAMES * 2) {
-                            int16_t* blk2 = nullptr;
                             if (xQueueReceive(s_i2s_queue, pcm_block, pdMS_TO_TICKS(100)) != pdTRUE)
                                 break;
 
@@ -856,8 +950,50 @@ enter_cooldown:
                 }
             }
         }
+#endif  // !STANDALONE_TEST
     }
 }
+
+// ─── Tarea: Consola de prueba (solo STANDALONE_TEST) ─────────────────────────
+// Lee líneas del monitor serial y las envía via UART1 como si fueran
+// comandos detectados por voz. Escribe cualquier texto + Enter para probar.
+#if STANDALONE_TEST
+static void console_task(void* arg) {
+    ESP_LOGI(TAG, "=== MODO TEST: escribe un comando y presiona Enter ===");
+    ESP_LOGI(TAG, "Comandos: enciende la luz | apaga la luz | abre la puerta | "
+                  "cierra la puerta | ayuda emergencia | mueve el robot | <texto libre>");
+    char line[128];
+    int  pos = 0;
+    while (true) {
+        int c = getchar();
+        if (c == EOF || c < 0) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
+        if (c == '\r') continue;
+        if (c == '\n' || pos >= (int)sizeof(line) - 2) {
+            line[pos] = '\0';
+            pos = 0;
+            if (strlen(line) == 0) continue;
+
+            ESP_LOGI(TAG, "[CONSOLA] → '%s'", line);
+
+            // Enviar directo como CMD a UART1 (igual que haría el pipeline de voz)
+            char uart_msg[160];
+            snprintf(uart_msg, sizeof(uart_msg), "%s%s\n", UART_CMD_PREFIX, line);
+            uart_write_bytes(UART_PORT, uart_msg, strlen(uart_msg));
+            ESP_LOGI(TAG, "[CONSOLA] Enviado UART1: %s", uart_msg);
+
+            // También loguear el intent que clasificaría localmente
+            for (int i = 0; i < LOCAL_INTENT_UNKNOWN; i++) {
+                if (strcasecmp(line, LOCAL_INTENT_CMDS[i]) == 0) {
+                    ESP_LOGI(TAG, "[CONSOLA] Intent reconocido: [%d] '%s'", i, LOCAL_INTENT_CMDS[i]);
+                    break;
+                }
+            }
+        } else {
+            line[pos++] = (char)c;
+        }
+    }
+}
+#endif
 
 // ═════════════════════════════════════════════════════════════════════════════
 extern "C" void app_main() {
@@ -870,6 +1006,7 @@ extern "C" void app_main() {
 
     init_led();
 
+#if !TEXT_ONLY_TEST
     // Tensor arena en PSRAM o internal RAM
     s_tensor_arena = (uint8_t*)heap_caps_malloc(TENSOR_ARENA_SIZE,
                                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -877,30 +1014,52 @@ extern "C" void app_main() {
         s_tensor_arena = (uint8_t*)heap_caps_malloc(TENSOR_ARENA_SIZE,
                                                      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!s_tensor_arena) { ESP_LOGE(TAG, "SIN MEMORIA para tensor arena"); return; }
+#endif
 
     ESP_LOGI(TAG, "RAM interna: %d | PSRAM: %d",
              heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
+#if !TEXT_ONLY_TEST
     init_microphone();
     init_speaker();
+#if !STANDALONE_TEST
     init_afe();
+#else
+    ESP_LOGI(TAG, "STANDALONE_TEST: AFE deshabilitado");
+#endif
     if (!init_frontend()) return;
+#else
+    ESP_LOGI(TAG, "TEXT_ONLY_TEST: Mic/Speaker/AFE deshabilitados");
+#endif
+#if !STANDALONE_TEST
     init_wifi();
+#else
+    ESP_LOGI(TAG, "STANDALONE_TEST: WiFi deshabilitado");
+    // Inicializar NVS (requerido por sistema aunque no usemos WiFi)
+    nvs_flash_init();
+#endif
     init_uart();
 
+#if !TEXT_ONLY_TEST
     s_i2s_queue     = xQueueCreate(I2S_QUEUE_DEPTH, I2S_BLOCK_BYTES);
     s_speaker_queue = xQueueCreate(32, sizeof(int16_t*));
     if (!s_i2s_queue || !s_speaker_queue) { ESP_LOGE(TAG, "Queues fallaron"); return; }
+#endif
 
     led_set(0, 0, 15);
 
     // Tasks
+#if !TEXT_ONLY_TEST
     xTaskCreatePinnedToCore(i2s_reader_task,   "i2s",      4096,  nullptr, 8, nullptr, 0);
     xTaskCreatePinnedToCore(speaker_task,      "speaker",  4096,  nullptr, 5, nullptr, 0);
     xTaskCreatePinnedToCore(turbo_check_task,  "turbo",    4096,  nullptr, 2, nullptr, 0);
-    xTaskCreatePinnedToCore(uart_monitor_task, "uart_mon", 2048,  nullptr, 4, nullptr, 0);
     xTaskCreatePinnedToCore(wakeword_task,     "wakeword", 32768, nullptr, 6, nullptr, 1);
+#endif
+    xTaskCreatePinnedToCore(uart_monitor_task, "uart_mon", 2048,  nullptr, 4, nullptr, 0);
+#if STANDALONE_TEST
+    xTaskCreatePinnedToCore(console_task,      "console",  4096,  nullptr, 3, nullptr, 0);
+#endif
 
     ESP_LOGI(TAG, "Sistema listo.");
 }

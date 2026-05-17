@@ -1,7 +1,6 @@
-FILE(GLOB_RECURSE app_sources "*.c" "*.cpp" "*.cc")
-
+# Solo compilar fuentes del firmware — excluir archivos de test en host
 idf_component_register(
-    SRCS         ${app_sources}
+    SRCS         "main.cpp" "tiny_nlu.cpp"
     INCLUDE_DIRS "."
     REQUIRES     led_strip driver
 )
