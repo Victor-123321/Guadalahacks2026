@@ -33,6 +33,7 @@ from tools import ToolManager
 from tts import ArdoTTS
 from voice_listener import VoiceListener
 from ha_watcher import HAWatcher
+from device_bridge import DeviceBridgeServer, get_local_ip, EVENT_TO_COMMAND
 
 logger = Logger()
 
@@ -443,15 +444,20 @@ class AIWorker(QThread):
     response_ready = pyqtSignal(str, float)   # response_text, latency_ms
     error_occurred = pyqtSignal(str)
 
-    def __init__(self, ai_manager, message: str):
-        super().__init__(); self.ai = ai_manager; self.msg = message
+    def __init__(self, ai_manager, message: str, system_prompt: str = ""):
+        super().__init__()
+        self.ai            = ai_manager
+        self.msg           = message
+        self.system_prompt = system_prompt
 
     def run(self):
         try:
             loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
             t0 = time.perf_counter()
             try:
-                resp = loop.run_until_complete(self.ai.chat(self.msg, provider="auto"))
+                resp = loop.run_until_complete(
+                    self.ai.chat(self.msg, system_prompt=self.system_prompt, provider="auto")
+                )
             finally: loop.close()
             ms = (time.perf_counter() - t0) * 1000
             self.response_ready.emit(resp or "", ms)
@@ -508,6 +514,18 @@ class ArdoDesktopWindow(QMainWindow):
         self._voice.error_occurred.connect(self._on_voice_error)
         self._voice.barge_in.connect(self.voice.stop)
         self._voice.start()
+
+        # Puente HTTP bidireccional para todos los dispositivos IoT de la red
+        self._esp_bridge = DeviceBridgeServer(
+            get_status=lambda: {dev.id: dev.state for dev in self.devices}
+        )
+        self._esp_bridge.command_received.connect(self._on_esp_command)
+        self._esp_bridge.nlu_received.connect(self._on_esp_nlu)
+        self._esp_bridge.data_received.connect(self._on_device_data)
+        self._esp_bridge.event_received.connect(self._on_device_event)
+        self._esp_bridge.start()
+        QTimer.singleShot(800, self._update_esp_badge)
+
         log_info("Ardo Desktop iniciado")
 
     # ── UI raíz ────────────────────────────────────────────────────────────────
@@ -554,42 +572,6 @@ class ArdoDesktopWindow(QMainWindow):
             return s
 
         lay.addWidget(_sep())
-
-        # Motor de comandos
-        sec = QLabel("MOTOR DE COMANDOS"); sec.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
-        sec.setStyleSheet(f"color:{C['dim']};background:transparent;padding:2px 2px 2px 4px;")
-        lay.addWidget(sec)
-
-        self._sidebar_badges: dict = {}
-        for key, name, sub_txt, active in [
-            ("nlu", "Ardo NLU",        "TinyNLU · ESP32-S3",        True),
-            ("llm", "Ollama LLM",      "qwen2.5:7b · 192.168.12.1", False),
-            ("ha",  "Home Assistant",  "192.168.12.1:8123",          False),
-            ("stt", "Whisper STT",     "192.168.12.1:6767",          False),
-        ]:
-            item = QFrame()
-            item.setStyleSheet(
-                f"QFrame{{background:{'#0d2b22' if active else 'transparent'};"
-                f"border-radius:8px;{'border-left:3px solid '+C['teal']+';' if active else ''}}}"
-            )
-            il = QHBoxLayout(item); il.setContentsMargins(8,6,8,6); il.setSpacing(8)
-            tc2 = QVBoxLayout(); tc2.setSpacing(0)
-            nl = QLabel(name); nl.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold if active else QFont.Weight.Normal))
-            nl.setStyleSheet(f"color:{C['teal'] if active else C['muted']};background:transparent;")
-            sl = QLabel(sub_txt); sl.setFont(QFont("Segoe UI", 8))
-            sl.setStyleSheet(f"color:{C['dim']};background:transparent;")
-            tc2.addWidget(nl); tc2.addWidget(sl); il.addLayout(tc2, 1)
-            badge = QLabel("ON" if active else "…")
-            badge.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
-            badge.setFixedSize(26, 16)
-            badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            badge.setStyleSheet(
-                f"color:white;background:{C['teal'] if active else C['dim']};border-radius:4px;"
-            )
-            il.addWidget(badge)
-            self._sidebar_badges[key] = badge
-            lay.addWidget(item)
-
         lay.addStretch()
 
         # Cara
@@ -608,10 +590,11 @@ class ArdoDesktopWindow(QMainWindow):
         sl2 = QVBoxLayout(status_frame); sl2.setContentsMargins(10,8,10,8); sl2.setSpacing(4)
         self._status_rows = {}
         for key, label, default_val, default_color in [
-            ("estado",      "Estado",       "En línea",   C["online"]),
-            ("dispositivos","Dispositivos", "0/0 on",     C["text"]),
-            ("latencia",    "Latencia NLU", "— ms",       C["teal"]),
-            ("modo",        "Modo",         "100% offline",C["muted"]),
+            ("estado",      "Estado",       "En línea",    C["online"]),
+            ("dispositivos","Dispositivos", "0/0 on",      C["text"]),
+            ("latencia",    "Latencia NLU", "— ms",        C["teal"]),
+            ("modo",        "Modo",         "100% offline", C["muted"]),
+            ("esp32",       "ESP32 Bridge", "—",           C["dim"]),
         ]:
             row_w = QHBoxLayout(); row_w.setSpacing(0)
             k = QLabel(label); k.setFont(QFont("Segoe UI", 8))
@@ -865,6 +848,20 @@ class ArdoDesktopWindow(QMainWindow):
         self._set_status("Procesando…", C["warning"])
         self.input_field.setEnabled(False); self.send_btn.setEnabled(False)
 
+        # Memoria: detectar comandos especiales ("recuerda que…", "/olvida …", etc.)
+        memoria_resp = self.memoria.procesar_mensaje_usuario(text)
+        if memoria_resp is not None:
+            self._add_recent(text, "chat", "MEMORIA")
+            self._info_lbl.setText(memoria_resp)
+            self.voice.speak(memoria_resp)
+            self.stack.setCurrentIndex(1)
+            self.face.set_state("esperando", ms=3000)
+            self._idle_timer.start()
+            self._set_status("Listo", C["online"])
+            self.input_field.setEnabled(True)
+            self.send_btn.setEnabled(True)
+            return
+
         # Herramientas locales (búsqueda web, control de luces, etc.)
         tool = self.tools.detectar_y_ejecutar(text)
         if tool:
@@ -879,7 +876,9 @@ class ArdoDesktopWindow(QMainWindow):
             self.send_btn.setEnabled(True)
             return
 
-        self._ai_worker = AIWorker(self.ai, text)
+        # AI: incluir contexto de memoria como parte del system prompt para Ollama
+        memory_ctx = self.memoria.obtener_contexto_para_prompt()
+        self._ai_worker = AIWorker(self.ai, text, system_prompt=memory_ctx)
         self._ai_worker.response_ready.connect(self._on_response)
         self._ai_worker.error_occurred.connect(self._on_error)
         self._ai_worker.start()
@@ -907,6 +906,7 @@ class ArdoDesktopWindow(QMainWindow):
         # Para UNKNOWN el AIWorker ya llamó a Ollama; usar esa respuesta en TTS
         speak_text = ai_response if result["intent"] == "UNKNOWN" else result["response"]
         self.voice.speak(speak_text)
+        self.memoria.procesar_respuesta_lune(speak_text)
 
         # Llamar HA bridge en hilo de fondo para no bloquear la UI
         if is_iot:
@@ -935,7 +935,9 @@ class ArdoDesktopWindow(QMainWindow):
     def _refresh_recent_list(self):
         while self._recent_layout.count():
             item = self._recent_layout.takeAt(0)
-            if item.widget(): item.widget().deleteLater()
+            w = item.widget()
+            if w and w is not self._recent_placeholder:
+                w.deleteLater()
         if not self.recent:
             self._recent_layout.addWidget(self._recent_placeholder)
             return
@@ -961,15 +963,10 @@ class ArdoDesktopWindow(QMainWindow):
         if state == "grabando":
             self.face.set_state("pensando")
             self._set_status("Grabando voz…", C["teal"])
-            b = self._sidebar_badges.get("stt")
-            if b: b.setText("REC")
         elif state == "procesando":
             self._set_status("Transcribiendo…", C["warning"])
         elif state == "listo":
             self._set_status("Listo", C["online"])
-            b = self._sidebar_badges.get("stt")
-            if b and b.text() == "REC":
-                b.setText("ON")
 
     def _on_voice_error(self, error: str):
         log_error(f"[STT] {error}")
@@ -999,6 +996,60 @@ class ArdoDesktopWindow(QMainWindow):
                 f"border:1px solid {C['border']};border-radius:21px;}}"
                 f"QPushButton:hover{{background:{C['border2']};color:{C['text']};}}"
             )
+
+    # ── ESP32 Bridge ───────────────────────────────────────────────────────────
+    def _update_esp_badge(self):
+        """Muestra IP:puerto del bridge en el panel de estado."""
+        addr = self._esp_bridge.address()
+        lbl = self._status_rows.get("esp32")
+        if lbl:
+            lbl.setText(addr)
+            lbl.setStyleSheet(f"color:{C['teal']};background:transparent;")
+
+    def _on_esp_command(self, text: str):
+        """Texto natural enviado por el ESP32 → pipeline completo (igual que escribir en UI)."""
+        if not self.input_field.isEnabled():
+            return  # ya procesando otro comando
+        self.input_field.setText(text)
+        self._process_command(text)
+
+    def _on_esp_nlu(self, intent: str, target: str):
+        """Intent ya procesado por cualquier dispositivo → actualiza UI y ejecuta HA."""
+        from tiny_nlu_provider import _RESP_TABLE
+        response = _RESP_TABLE.get((intent, target),
+                   _RESP_TABLE.get((intent, "MAIN"), "Comando recibido"))
+
+        result_mock = {"intent": intent, "target": target, "confidence": 1.0}
+        apply_nlu(result_mock, self.devices)
+        self._add_recent(f"[IoT] {intent}", intent_to_badge(intent), intent)
+        self._refresh_device_cards()
+        self._update_status_panel()
+        self.voice.speak(response)
+
+        is_iot = not intent.startswith("CHAT_") and intent != "UNKNOWN"
+        if is_iot:
+            threading.Thread(
+                target=self._execute_ha_command,
+                args=(intent, target),
+                daemon=True,
+            ).start()
+
+    def _on_device_data(self, device_id: str, data_type: str, value_str: str):
+        """Dato de sensor recibido desde un dispositivo remoto → mostrar en UI."""
+        log_info(f"[Bridge] {device_id}: {data_type} = {value_str}")
+        self._set_status(f"{device_id}: {data_type} = {value_str}", C["teal"])
+        QTimer.singleShot(4000, lambda: self._set_status("Listo", C["online"]))
+
+    def _on_device_event(self, device_id: str, event_name: str, meta_json: str):
+        """Evento de dispositivo remoto → mapear a comando NLU si corresponde."""
+        log_info(f"[Bridge] {device_id} → {event_name}")
+        text = EVENT_TO_COMMAND.get(event_name)
+        if text:
+            self._on_esp_command(text)
+        else:
+            self._add_recent(f"[{device_id}] {event_name}", "chat", "EVENT")
+            self._set_status(f"Evento: {event_name}", C["muted"])
+            QTimer.singleShot(3000, lambda: self._set_status("Listo", C["online"]))
 
     def _on_ha_states(self, states: dict):
         """Recibe {device_id: bool} de HAWatcher y actualiza la UI en tiempo real."""
@@ -1035,13 +1086,8 @@ class ArdoDesktopWindow(QMainWindow):
             QTimer.singleShot(0, lambda: self._apply_connection_status(ollama_up, ha_up, stt_up))
         threading.Thread(target=_check, daemon=True).start()
 
-    def _apply_connection_status(self, ollama_up: bool, ha_up: bool, stt_up: bool = False):
-        for key, up in [("llm", ollama_up), ("ha", ha_up), ("stt", stt_up)]:
-            badge = self._sidebar_badges.get(key)
-            if badge:
-                badge.setText("ON" if up else "OFF")
-                color = C["teal"] if up else C["error"]
-                badge.setStyleSheet(f"color:white;background:{color};border-radius:4px;")
+    def _apply_connection_status(self, *_):
+        pass
 
     def _on_device_toggled(self, device_id: str, new_state: bool):
         for dev in self.devices:
@@ -1073,13 +1119,25 @@ class ArdoDesktopWindow(QMainWindow):
         self.stack.setCurrentIndex(1)
 
     def _clear_recent(self):
-        self.recent.clear(); self._refresh_recent_list()
+        self.recent.clear()
+        self._refresh_recent_list()
+        self.ai.clear_history()
+        self.input_field.clear()
+        self.face.set_state("esperando")
+        self._lat_lbl.setText("—  ms")
+        self._set_status("Listo", C["online"])
 
     def _toggle_voice(self):
         on = self.voice.toggle()
         self._voice_btn.setText(f"  ▶  Voz: {'ON' if on else 'OFF'}")
 
     def closeEvent(self, event):
+        if hasattr(self, "_esp_bridge"):
+            self._esp_bridge.stop()
+        if hasattr(self, "_ha_watcher"):
+            self._ha_watcher.stop()
+        if hasattr(self, "_voice"):
+            self._voice.stop_listening()
         if hasattr(self, "memoria"):
             stats = self.memoria.get_stats()
             self.memoria.cerrar_sesion(

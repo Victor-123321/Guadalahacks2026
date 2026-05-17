@@ -76,7 +76,7 @@ class OllamaProvider(AIProvider):
         if self.cancel_flag:
             return ""
 
-        sysprompt = system_prompt or _SYSTEM_PROMPT
+        sysprompt = _SYSTEM_PROMPT + ("\n\n" + system_prompt if system_prompt else "")
         messages = (
             [{"role": "system", "content": sysprompt}]
             + self._history[-10:]

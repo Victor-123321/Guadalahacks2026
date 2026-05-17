@@ -4,11 +4,26 @@
     "preferencias": [],
     "contexto": ""
   },
-  "recuerdos": [],
-  "resumen_sesion_anterior": "Sesión del 17/05/2026. Mensajes: 2.",
+  "recuerdos": [
+    {
+      "id": "7ad12728",
+      "fecha": "2026-05-17T05:20:28.261009",
+      "tipo": "tarea",
+      "contenido": "debo limpiar mi habitacion",
+      "tags": []
+    },
+    {
+      "id": "c52a3f80",
+      "fecha": "2026-05-17T05:21:23.837244",
+      "tipo": "tarea",
+      "contenido": "debo alistarme",
+      "tags": []
+    }
+  ],
+  "resumen_sesion_anterior": "Sesión del 17/05/2026. Mensajes: 6.",
   "estadisticas": {
-    "total_mensajes": 2,
+    "total_mensajes": 6,
     "primera_sesion": "2026-05-16T19:13:30.370147",
-    "ultima_sesion": "2026-05-17T05:03:22.016908"
+    "ultima_sesion": "2026-05-17T05:32:36.622249"
   }
 }
