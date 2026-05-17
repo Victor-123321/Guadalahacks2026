@@ -27,6 +27,11 @@
             "emergency":     "script.alerta_emergencia"
         }
     },
+    "stt": {
+        "url": "http://192.168.12.1:6767/v1/audio/transcriptions",
+        "language": "es",
+        "energy_threshold": 400
+    },
     "ollama": {
         "host": "http://192.168.12.1:8080",
         "model": "qwen2.5:7b",

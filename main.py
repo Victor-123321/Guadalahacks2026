@@ -31,6 +31,7 @@ import datos
 from memoria import MemoriaManager
 from tools import ToolManager
 from tts import ArdoTTS
+from voice_listener import VoiceListener
 
 logger = Logger()
 
@@ -384,8 +385,9 @@ class FaceWidget(QFrame):
 # ─── Voz ──────────────────────────────────────────────────────────────────────
 class VoiceEngine:
     def __init__(self):
-        self._enabled = True
-        self._lock = threading.Lock()
+        self._enabled   = True
+        self._lock      = threading.Lock()
+        self._stop_flag = False
         self._tts = None
         try:
             self._tts = ArdoTTS()
@@ -395,19 +397,41 @@ class VoiceEngine:
     def speak(self, text: str):
         if not self._enabled or not self._tts: return
         clean = re.sub(r'[^\w\s,.!?áéíóúüñ¿¡`]', '', text, flags=re.UNICODE).strip()[:300]
-        if clean: threading.Thread(target=self._run, args=(clean,), daemon=True).start()
+        if clean:
+            self._stop_flag = False
+            threading.Thread(target=self._run, args=(clean,), daemon=True).start()
+
+    def stop(self):
+        """Interrumpe la reproducción en curso (barge-in)."""
+        import sounddevice as sd
+        self._stop_flag = True
+        try:
+            sd.stop()
+        except Exception:
+            pass
 
     def _run(self, text):
         with self._lock:
+            tmp_path = None
             try:
-                import tempfile, winsound
+                import tempfile
+                import soundfile as sf
+                import sounddevice as sd
                 tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
                 tmp.close()
-                self._tts.generate_to_file(text, tmp.name)
-                winsound.PlaySound(tmp.name, winsound.SND_FILENAME)
-                os.unlink(tmp.name)
+                tmp_path = tmp.name
+                self._tts.generate_to_file(text, tmp_path)
+                if not self._stop_flag:
+                    data, rate = sf.read(tmp_path)
+                    sd.play(data, rate)
+                    sd.wait()   # bloquea hasta terminar; sd.stop() lo interrumpe
             except Exception as e:
-                log_error(f"VoiceEngine Kokoro speak: {e}")
+                log_error(f"VoiceEngine speak: {e}")
+            finally:
+                self._stop_flag = False
+                if tmp_path and os.path.exists(tmp_path):
+                    try: os.unlink(tmp_path)
+                    except Exception: pass
 
     def toggle(self) -> bool: self._enabled = not self._enabled; return self._enabled
     @property
@@ -454,8 +478,15 @@ class ArdoDesktopWindow(QMainWindow):
         self._idle_timer.setInterval(8000)
         self._idle_timer.timeout.connect(lambda: self.face.set_state("esperando"))
         self._idle_timer.start()
-        # Verificar conectividad a Ollama y HA tras 2 s (la UI ya está visible)
+        # Verificar conectividad a Ollama, HA y STT tras 2 s
         QTimer.singleShot(2000, self._check_connections)
+        # Arrancar escucha de micrófono
+        self._voice = VoiceListener()
+        self._voice.transcription_ready.connect(self._on_voice_transcription)
+        self._voice.state_changed.connect(self._on_voice_state)
+        self._voice.error_occurred.connect(self._on_voice_error)
+        self._voice.barge_in.connect(self.voice.stop)
+        self._voice.start()
         log_info("Ardo Desktop iniciado")
 
     # ── UI raíz ────────────────────────────────────────────────────────────────
@@ -513,6 +544,7 @@ class ArdoDesktopWindow(QMainWindow):
             ("nlu", "Ardo NLU",        "TinyNLU · ESP32-S3",        True),
             ("llm", "Ollama LLM",      "qwen2.5:7b · 192.168.12.1", False),
             ("ha",  "Home Assistant",  "192.168.12.1:8123",          False),
+            ("stt", "Whisper STT",     "192.168.12.1:6767",          False),
         ]:
             item = QFrame()
             item.setStyleSheet(
@@ -779,8 +811,20 @@ class ArdoDesktopWindow(QMainWindow):
             f"QFrame{{background:{C['surface']};border-top:1px solid {C['border']};}}"
         )
         b2l = QVBoxLayout(bar2); b2l.setContentsMargins(20,10,20,6); b2l.setSpacing(3)
+        self.mic_btn = QPushButton("🎤")
+        self.mic_btn.setFixedSize(42, 42)
+        self.mic_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.mic_btn.setFont(QFont("Segoe UI", 16))
+        self.mic_btn.setToolTip("Activar / silenciar micrófono")
+        self.mic_btn.setCheckable(True)
+        self.mic_btn.setChecked(True)
+        self._apply_mic_style(active=True)
+        self.mic_btn.clicked.connect(self._on_mic_toggle)
+
         row1 = QHBoxLayout(); row1.setSpacing(10)
-        row1.addWidget(self.input_field, 1); row1.addWidget(self.send_btn)
+        row1.addWidget(self.mic_btn)
+        row1.addWidget(self.input_field, 1)
+        row1.addWidget(self.send_btn)
         row2 = QHBoxLayout()
         row2.addWidget(shortcuts); row2.addStretch(); row2.addWidget(self._lat_lbl)
         b2l.addLayout(row1); b2l.addLayout(row2)
@@ -882,6 +926,51 @@ class ArdoDesktopWindow(QMainWindow):
             if dev.id in self._device_cards:
                 self._device_cards[dev.id].update_device(dev)
 
+    # ── Voz ────────────────────────────────────────────────────────────────────
+    def _on_voice_transcription(self, text: str):
+        """Texto llegado del STT → entra al pipeline como si el usuario lo hubiera escrito."""
+        self.input_field.setText(text)
+        self._process_command(text)
+
+    def _on_voice_state(self, state: str):
+        """Actualiza UI según el estado del micrófono."""
+        if state == "grabando":
+            self.face.set_state("pensando")
+            self._set_status("Escuchando voz…", C["teal"])
+            self._sidebar_badges.get("stt") and self._sidebar_badges["stt"].setText("REC")
+        elif state == "procesando":
+            self._set_status("Transcribiendo…", C["warning"])
+        elif state == "escuchando":
+            self._set_status("Listo", C["online"])
+            b = self._sidebar_badges.get("stt")
+            if b and b.text() == "REC":
+                b.setText("ON")
+
+    def _on_voice_error(self, error: str):
+        log_error(f"[STT] {error}")
+
+    def _on_mic_toggle(self):
+        muted = self._voice.toggle_mute()
+        self._apply_mic_style(active=not muted)
+
+    def _apply_mic_style(self, active: bool):
+        if not hasattr(self, "mic_btn"):
+            return
+        if active:
+            self.mic_btn.setText("🎤")
+            self.mic_btn.setStyleSheet(
+                f"QPushButton{{background:{C['teal_dark']};color:{C['teal']};"
+                f"border:1px solid {C['teal']};border-radius:21px;}}"
+                f"QPushButton:hover{{background:{C['teal']};color:white;}}"
+            )
+        else:
+            self.mic_btn.setText("🔇")
+            self.mic_btn.setStyleSheet(
+                f"QPushButton{{background:{C['surface3']};color:{C['muted']};"
+                f"border:1px solid {C['border']};border-radius:21px;}}"
+                f"QPushButton:hover{{background:{C['border2']};color:{C['text']};}}"
+            )
+
     def _execute_ha_command(self, intent: str, target: str):
         """Llama al HA bridge en un hilo de fondo para no bloquear la UI."""
         from ha_bridge import execute_nlu_command
@@ -889,17 +978,23 @@ class ArdoDesktopWindow(QMainWindow):
         log_info(f"[HA] {intent}/{target} → {'OK' if ok else 'FAIL'}")
 
     def _check_connections(self):
-        """Comprueba Ollama y HA en background; actualiza badges del sidebar."""
+        """Comprueba Ollama, HA y STT en background; actualiza badges del sidebar."""
         def _check():
             from ha_bridge import is_connected as ha_ok
+            import requests as _req
             ha_up     = ha_ok()
             ollama_up = self.ai.ollama_available()
-            # Actualizar UI desde el hilo principal vía QTimer
-            QTimer.singleShot(0, lambda: self._apply_connection_status(ollama_up, ha_up))
+            stt_base = "http://192.168.12.1:6767"
+            try:
+                r = _req.get(f"{stt_base}/v1/models", timeout=3)
+                stt_up = r.status_code == 200
+            except Exception:
+                stt_up = False
+            QTimer.singleShot(0, lambda: self._apply_connection_status(ollama_up, ha_up, stt_up))
         threading.Thread(target=_check, daemon=True).start()
 
-    def _apply_connection_status(self, ollama_up: bool, ha_up: bool):
-        for key, up in [("llm", ollama_up), ("ha", ha_up)]:
+    def _apply_connection_status(self, ollama_up: bool, ha_up: bool, stt_up: bool = False):
+        for key, up in [("llm", ollama_up), ("ha", ha_up), ("stt", stt_up)]:
             badge = self._sidebar_badges.get(key)
             if badge:
                 badge.setText("ON" if up else "OFF")

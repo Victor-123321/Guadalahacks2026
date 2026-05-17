@@ -7,8 +7,11 @@ PyQt6>=6.6.0
 # LLM local en red (Ollama)
 ollama>=0.2.0
 
-# HTTP para Home Assistant bridge
+# HTTP para Home Assistant bridge y STT
 requests>=2.31.0
+
+# Captura de micrófono (voz)
+sounddevice>=0.4.6
 
 # Voz (opcional — instalar al menos uno)
 # pip install edge-tts pygame    <- recomendado
