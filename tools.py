@@ -1,6 +1,6 @@
 """
 tools.py — Herramientas locales de escritorio para Ardo Desktop.
-Búsqueda web, apertura de URLs y lanzamiento de apps. Sin IA.
+Búsqueda web, apertura de URLs, lanzamiento de apps y control HA Bridge.
 """
 
 import os
@@ -16,6 +16,25 @@ try:
 except ImportError:
     psutil = None
 
+try:
+    from ha_bridge import turn_on_light as _ha_on, turn_off_light as _ha_off
+    _HA_AVAILABLE = True
+except ImportError:
+    _HA_AVAILABLE = False
+    def _ha_on(e): return f"HA Bridge no disponible para {e}"
+    def _ha_off(e): return f"HA Bridge no disponible para {e}"
+
+_ROOM_TO_ENTITY: Dict[str, str] = {
+    "sala":        "light.sala",
+    "living":      "light.sala",
+    "cuarto":      "light.cuarto",
+    "dormitorio":  "light.cuarto",
+    "habitacion":  "light.cuarto",
+    "recamara":    "light.cuarto",
+    "garage":      "light.garage",
+    "cochera":     "light.garage",
+}
+
 
 class ToolResult:
     def __init__(self, ok: bool, mensaje: str, datos: dict = None):
@@ -27,10 +46,12 @@ class ToolResult:
 class ToolManager:
     def __init__(self):
         self._tools = {
-            "buscar_web":  self._cmd_buscar_web,
-            "abrir_url":   self._cmd_abrir_url,
-            "lanzar_app":  self._cmd_lanzar_app,
-            "sistema_info": self._cmd_sistema_info,
+            "buscar_web":    self._cmd_buscar_web,
+            "abrir_url":     self._cmd_abrir_url,
+            "lanzar_app":    self._cmd_lanzar_app,
+            "sistema_info":  self._cmd_sistema_info,
+            "encender_luz":  self._cmd_encender_luz,
+            "apagar_luz":    self._cmd_apagar_luz,
         }
 
     def detectar_y_ejecutar(self, texto: str) -> Optional[ToolResult]:
@@ -88,6 +109,21 @@ class ToolManager:
 
         if any(k in texto_lower for k in ["info del sistema", "estado del pc", "cuanta ram"]):
             return self._cmd_sistema_info()
+
+        # HA Bridge — control directo de luces inteligentes
+        if any(k in texto_lower for k in ["enciende", "prende", "encender", "prender"]):
+            if any(k in texto_lower for k in ["luz", "foco", "lampara"]):
+                for room, entity_id in _ROOM_TO_ENTITY.items():
+                    if room in texto_lower:
+                        return self._cmd_encender_luz(entity_id)
+                return self._cmd_encender_luz("light.sala")
+
+        if any(k in texto_lower for k in ["apaga", "apagar"]):
+            if any(k in texto_lower for k in ["luz", "foco", "lampara"]):
+                for room, entity_id in _ROOM_TO_ENTITY.items():
+                    if room in texto_lower:
+                        return self._cmd_apagar_luz(entity_id)
+                return self._cmd_apagar_luz("light.sala")
 
         return None
 
@@ -180,12 +216,55 @@ class ToolManager:
         ram = psutil.virtual_memory().percent
         return ToolResult(True, f"💻 CPU: {cpu}%  |  RAM: {ram}%")
 
+    def _cmd_encender_luz(self, entity_id: str) -> ToolResult:
+        resultado = _ha_on(entity_id)
+        ok = resultado.startswith("OK")
+        area = entity_id.replace("light.", "").replace("switch.", "").capitalize()
+        msg = f"💡 Luz {area} encendida." if ok else f"⚠️ {resultado}"
+        return ToolResult(ok, msg, {"entity_id": entity_id, "resultado": resultado})
+
+    def _cmd_apagar_luz(self, entity_id: str) -> ToolResult:
+        resultado = _ha_off(entity_id)
+        ok = resultado.startswith("OK")
+        area = entity_id.replace("light.", "").replace("switch.", "").capitalize()
+        msg = f"🌑 Luz {area} apagada." if ok else f"⚠️ {resultado}"
+        return ToolResult(ok, msg, {"entity_id": entity_id, "resultado": resultado})
+
     def listar_disponibles(self) -> str:
+        ha_status = "✓ Activo (simulado)" if _HA_AVAILABLE else "✗ ha_bridge.py no encontrado"
         return (
-            "🛠  **Herramientas locales activas:**\n\n"
-            "  ✓ 🔍 Buscar en Google o YouTube\n"
-            "  ✓ 🌐 Abrir sitios web\n"
-            "  ✓ 🚀 Lanzar programas del PC\n"
-            "  ✓ 💻 Ver estado del sistema\n\n"
-            "Ejemplos: *'busca en youtube lofi'*, *'abre github'*, *'lanza el programa paint'*"
+            "🛠  COMANDOS DISPONIBLES EN ARDO\n\n"
+
+            "── DOMÓTICA (NLU local) ─────────────────\n"
+            "    enciende / apaga la luz del cuarto / sala / todas\n"
+            "    abre / cierra la cerradura\n"
+            "    pon a limpiar el robot  /  para la aspiradora\n"
+            "    enciende / apaga la televisión\n"
+            "    sube / baja las persianas\n"
+            "    ayuda / socorro / me caí  (activa alerta)\n\n"
+
+            "── BÚSQUEDA Y WEB ───────────────────────\n"
+            "    busca [término]\n"
+            "    busca en youtube [término]\n"
+            "    abre youtube / google / github / netflix / spotify / whatsapp / twitter\n"
+            "    ve a [sitio.com]\n\n"
+
+            "── PROGRAMAS ────────────────────────────\n"
+            "    lanza el programa paint / calculadora / notepad / word / excel\n"
+            "    abre el programa explorador / cmd\n\n"
+
+            "── SISTEMA ──────────────────────────────\n"
+            "    info del sistema  /  estado del pc  /  cuánta ram\n\n"
+
+            "── MEMORIA PERSONAL ─────────────────────\n"
+            "    recuerda que [dato]\n"
+            "    mi nombre es [nombre]\n"
+            "    prefiero [algo]  /  me gusta [algo]\n"
+            "    memoria  (ver todos los recuerdos)\n"
+            "    olvida [id o fragmento]  /  olvida todo\n\n"
+
+            "── CASA INTELIGENTE (HA Bridge) ─────────\n"
+            f"  Estado: {ha_status}\n"
+            "    enciende / apaga la luz de la sala / cuarto / garage\n"
+            "  (Para conectar a Home Assistant real, configura ha_bridge.py)\n"
         )
