@@ -1,30 +1,22 @@
 """
-Ardo Desktop — Interfaz gráfica local para el motor TinyNLU del ESP2 (Ardo v2)
-GUI adaptada de Lune CD. Backend: TinyNLU, 100% offline.
+Ardo Desktop — Dashboard de domótica local con TinyNLU (ESP32-S3)
 """
 
-import sys
-import asyncio
-import threading
-import io
-import re
-import subprocess
-import os
-import json
-import importlib
-import random
-from PyQt6.QtGui import QPainter
+import sys, asyncio, threading, io, re, os, time
+from dataclasses import dataclass
+from typing import Optional, List
 from pathlib import Path
 from datetime import datetime
 
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLineEdit, QPushButton, QLabel, QScrollArea, QFrame,
-    QApplication, QMessageBox, QStackedWidget, QTextEdit,
-    QSizePolicy
+    QApplication, QStackedWidget
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QUrl
-from PyQt6.QtGui import QFont, QColor, QPalette, QIcon, QPixmap
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QUrl
+from PyQt6.QtGui import (
+    QFont, QColor, QPalette, QPainter, QBrush, QIcon
+)
 
 try:
     from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
@@ -33,7 +25,6 @@ try:
 except ImportError:
     _MULTIMEDIA_OK = False
 
-from config import Config
 from ai_manager import AIManager
 from utils import Logger, log_info, log_error
 import datos
@@ -43,1142 +34,882 @@ from tools import ToolManager
 logger = Logger()
 
 # ─── Colores ──────────────────────────────────────────────────────────────────
-COLORS = {
-    "bg":           "#0e0f14",
-    "surface":      "#161820",
-    "surface2":     "#1e2130",
-    "surface3":     "#252840",
-    "border":       "#2a2d45",
-    "border2":      "#353860",
-    "text":         "#e8eaf6",
-    "text_muted":   "#7b7fa8",
-    "text_dim":     "#4a4e72",
-    "accent":       "#00c2a0",       # verde-teal para Ardo
-    "accent2":      "#00e5c0",
-    "accent_dark":  "#007a65",
-    "success":      "#69db7c",
-    "error":        "#ff6b6b",
-    "warning":      "#ffd166",
-    "user_bubble":  "#2a2d4a",
-    "bot_bubble":   "#1e2035",
-    "scrollbar":    "#2a2d45",
+C = {
+    "bg":          "#070b12",   # fondo principal — azul muy oscuro
+    "surface":     "#0b1120",   # sidebar y paneles
+    "surface2":    "#0e1828",   # tarjetas y superficies
+    "surface3":    "#132033",   # hover / elementos activos
+    "border":      "#1b2e48",   # bordes sutiles
+    "border2":     "#274468",   # bordes visibles
+    "text":        "#d0e8ff",   # texto — blanco azulado
+    "muted":       "#4d7aaa",   # texto secundario
+    "dim":         "#243a5a",   # texto muy atenuado
+    "accent":      "#1b7fe0",   # azul principal (botones, activo)
+    "accent2":     "#3a9af5",   # azul claro (hover)
+    "accent_dark": "#0b3a77",   # azul oscuro (fondos accent)
+    "teal":        "#00b8d9",   # celeste (badges online / IoT)
+    "teal_dark":   "#004a60",   # celeste oscuro
+    "purple":      "#5b7fff",   # azul-violeta (device.set)
+    "online":      "#4cc87a",   # verde (estado online)
+    "error":       "#ff5555",   # rojo (errores)
+    "warning":     "#ffb94a",   # naranja (advertencias)
+    "card_on_bg":  "#071524",   # fondo tarjeta encendida
+    "card_on_bdr": "#1b7fe0",   # borde tarjeta encendida
+    "scroll":      "#1b2e48",   # scrollbar
 }
 
-PROVIDER_META = {
-    "tiny_nlu": {
-        "label":  "Ardo NLU",
-        "icon":   "🤖",
-        "color":  COLORS["accent"],
-        "dark":   COLORS["accent_dark"],
-        "desc":   "Motor de Comandos Local · ESP32-S3",
-        "system": lambda: "",
-    },
+QUICK_COMMANDS = [
+    ("○", "enciende la luz del cuarto"),
+    ("●", "apaga todas las luces"),
+    ("△", "sube el aire a 20 grados"),
+    ("▤", "cierra las persianas"),
+    ("◎", "pon a limpiar el robot"),
+]
+
+# ─── Modelos de datos ─────────────────────────────────────────────────────────
+@dataclass
+class DeviceState:
+    id:          str
+    name:        str
+    location:    str
+    dtype:       str   # light | door | thermostat | curtain | robot | tv | fan | speaker | coffee
+    icon:        str
+    state:       bool  = False
+    value:       Optional[str] = None
+
+@dataclass
+class RecentCmd:
+    ts:          str
+    text:        str
+    badge:       str   # device.on | device.off | device.set | emergency | unknown
+    intent:      str   = ""
+
+INITIAL_DEVICES: List[DeviceState] = [
+    DeviceState("light_main",    "Luz Sala",        "Sala",       "light",      "○",  True,  "80%"),
+    DeviceState("light_bedroom", "Luz Cuarto",      "Dormitorio", "light",      "○",  False, None),
+    DeviceState("fan_main",      "Ventilador",      "Sala",       "fan",        "✦",  False, None),
+    DeviceState("thermostat",    "A/C Dormitorio",  "Dormitorio", "thermostat", "◈",  True,  "22°C"),
+    DeviceState("curtain_main",  "Persianas",       "Sala",       "curtain",    "▤",  False, None),
+    DeviceState("door_main",     "Cerradura",       "Entrada",    "door",       "◆",  True,  None),
+    DeviceState("speaker_main",  "Altavoz",         "Cocina",     "speaker",    "▶",  False, None),
+    DeviceState("coffee_main",   "Cafetera",        "Cocina",     "coffee",     "◑",  False, None),
+]
+
+def intent_to_badge(intent: str) -> str:
+    on_intents  = {"LIGHT_ON","DOOR_OPEN","TV_ON","ROBOT_START","CURTAIN_OPEN"}
+    off_intents = {"LIGHT_OFF","DOOR_CLOSE","TV_OFF","ROBOT_STOP","CURTAIN_CLOSE"}
+    if intent in on_intents:   return "device.on"
+    if intent in off_intents:  return "device.off"
+    if intent == "THERMOSTAT": return "device.set"
+    if intent == "EMERGENCY":  return "emergency"
+    return "unknown"
+
+def apply_nlu(result: dict, devices: List[DeviceState]):
+    intent, target = result["intent"], result["target"]
+    for d in devices:
+        if intent == "LIGHT_ON":
+            if d.id == "light_main"    and target in ("MAIN","ALL"):  d.state = True
+            if d.id == "light_bedroom" and target in ("BEDROOM","ALL"): d.state = True
+        elif intent == "LIGHT_OFF":
+            if d.id == "light_main"    and target in ("MAIN","ALL"):  d.state = False
+            if d.id == "light_bedroom" and target in ("BEDROOM","ALL"): d.state = False
+        elif intent == "DOOR_OPEN"  and d.id == "door_main":    d.state = False
+        elif intent == "DOOR_CLOSE" and d.id == "door_main":    d.state = True
+        elif intent == "CURTAIN_OPEN"  and d.id == "curtain_main": d.state = False
+        elif intent == "CURTAIN_CLOSE" and d.id == "curtain_main": d.state = True
+        elif intent == "TV_ON"   and d.id.startswith("tv"):     d.state = True
+        elif intent == "TV_OFF"  and d.id.startswith("tv"):     d.state = False
+        elif intent == "ROBOT_START" and d.id == "robot_vacuum": d.state = True
+        elif intent == "ROBOT_STOP"  and d.id == "robot_vacuum": d.state = False
+
+# ─── Toggle Switch personalizado ─────────────────────────────────────────────
+class ToggleSwitch(QWidget):
+    toggled = pyqtSignal(bool)
+
+    def __init__(self, state: bool = False, parent=None):
+        super().__init__(parent)
+        self._on = state
+        self.setFixedSize(42, 22)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        bg = QColor(C["accent"] if self._on else C["border2"])
+        p.setBrush(QBrush(bg))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(0, 0, 42, 22, 11, 11)
+        x = 22 if self._on else 2
+        p.setBrush(QBrush(QColor("white")))
+        p.drawEllipse(x, 2, 18, 18)
+        p.end()
+
+    def mousePressEvent(self, _):
+        self._on = not self._on
+        self.toggled.emit(self._on)
+        self.update()
+
+    def set_state(self, s: bool):
+        self._on = s
+        self.update()
+
+# ─── Tarjeta de dispositivo ───────────────────────────────────────────────────
+class DeviceCard(QFrame):
+    toggle_requested = pyqtSignal(str, bool)
+
+    def __init__(self, device: DeviceState, parent=None):
+        super().__init__(parent)
+        self.device = device
+        self.setMinimumSize(170, 90)
+        self.setMaximumHeight(110)
+        self._build()
+        self._refresh_style()
+
+    def _build(self):
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(12, 10, 12, 10)
+        outer.setSpacing(4)
+
+        # Fila superior: icono + toggle
+        top = QHBoxLayout()
+        top.setSpacing(8)
+
+        icon_bg = QFrame()
+        icon_bg.setFixedSize(32, 32)
+        icon_bg.setStyleSheet(
+            f"QFrame{{background:{C['surface3']};border-radius:8px;}}"
+        )
+        icon_lbl = QLabel(self.device.icon)
+        icon_lbl.setFont(QFont("Segoe UI Symbol", 13))
+        icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_lbl.setStyleSheet("background:transparent;")
+        icon_layout = QVBoxLayout(icon_bg)
+        icon_layout.setContentsMargins(0,0,0,0)
+        icon_layout.addWidget(icon_lbl)
+
+        self.toggle = ToggleSwitch(self.device.state)
+        self.toggle.toggled.connect(
+            lambda s: self.toggle_requested.emit(self.device.id, s)
+        )
+
+        top.addWidget(icon_bg)
+        top.addStretch()
+        top.addWidget(self.toggle)
+        outer.addLayout(top)
+
+        # Nombre
+        self.name_lbl = QLabel(self.device.name)
+        self.name_lbl.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        self.name_lbl.setStyleSheet(f"color:{C['text']};background:transparent;")
+        outer.addWidget(self.name_lbl)
+
+        # Ubicación / valor
+        sub_row = QHBoxLayout()
+        sub_row.setSpacing(4)
+        self.loc_lbl = QLabel(self.device.location)
+        self.loc_lbl.setFont(QFont("Segoe UI", 8))
+        self.loc_lbl.setStyleSheet(f"color:{C['muted']};background:transparent;")
+        sub_row.addWidget(self.loc_lbl)
+        sub_row.addStretch()
+        self.val_lbl = QLabel(self.device.value or "")
+        self.val_lbl.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        self.val_lbl.setStyleSheet(f"color:{C['accent']};background:transparent;")
+        sub_row.addWidget(self.val_lbl)
+        outer.addLayout(sub_row)
+
+    def update_device(self, device: DeviceState):
+        self.device = device
+        self.toggle.set_state(device.state)
+        self.val_lbl.setText(device.value or ("Encendido" if device.state else "Apagado")
+                             if device.dtype != "door" else
+                             ("Cerrada" if device.state else "Abierta"))
+        self.val_lbl.setStyleSheet(
+            f"color:{'#ff6b6b' if device.dtype == 'door' and device.state else C['accent']};"
+            f"background:transparent;"
+        )
+        self._refresh_style()
+
+    def _refresh_style(self):
+        if self.device.state:
+            bdr = "#ff4a6e" if self.device.dtype == "door" else C["card_on_bdr"]
+            bg  = "#1f0a15" if self.device.dtype == "door" else C["card_on_bg"]
+        else:
+            bdr, bg = C["border"], C["surface2"]
+        self.setStyleSheet(
+            f"DeviceCard{{background:{bg};border:1px solid {bdr};"
+            f"border-radius:12px;}}"
+        )
+
+# ─── Chip de comando rápido ───────────────────────────────────────────────────
+class QuickChip(QPushButton):
+    def __init__(self, icon: str, text: str, parent=None):
+        super().__init__(f"  {icon}  {text}", parent)
+        self.setFont(QFont("Segoe UI", 9))
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(30)
+        self.setStyleSheet(
+            f"QPushButton{{background:{C['surface2']};color:{C['text']};"
+            f"border:1px solid {C['border2']};border-radius:14px;"
+            f"padding:0 14px;}}"
+            f"QPushButton:hover{{background:{C['surface3']};border-color:{C['accent']};"
+            f"color:{C['accent']};}}"
+        )
+
+# ─── Fila de comando reciente ─────────────────────────────────────────────────
+BADGE_COLORS = {
+    "device.on":  (C["teal"],    C["teal_dark"]),
+    "device.off": (C["muted"],   C["surface3"]),
+    "device.set": (C["purple"],  "#2a2060"),
+    "emergency":  (C["error"],   "#3a0808"),
+    "unknown":    (C["dim"],     C["surface2"]),
 }
 
-def _get_system_prompt():
-    return datos.get_personaje(
-        datos.get_bot().get("personaje_default", "Ardo")
-    ).get("systemPrompt", "")
+class RecentRow(QFrame):
+    def __init__(self, cmd: RecentCmd, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet(
+            f"QFrame{{background:{C['surface2']};border-radius:8px;"
+            f"border:1px solid {C['border']};}}"
+        )
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 8, 14, 8)
+        layout.setSpacing(12)
 
+        ts = QLabel(cmd.ts)
+        ts.setFont(QFont("Segoe UI", 9))
+        ts.setStyleSheet(f"color:{C['muted']};background:transparent;")
+        ts.setFixedWidth(38)
 
-# ─── Cara de Ardo ─────────────────────────────────────────────────────────────
-FACE_DIR = Path(__file__).parent / "lune_face"
+        txt = QLabel(cmd.text)
+        txt.setFont(QFont("Segoe UI", 10))
+        txt.setStyleSheet(f"color:{C['text']};background:transparent;")
 
-FACE_FILES = {
-    "normal":   ("lune_normal.png",   "image"),
-    "happy":    ("lune_happy.png",    "image"),
-    "thinking": ("pensando.mp4",      "video"),
-    "typing":   ("escribiendo.mp4",   "video"),
-    "reading":  ("lune_reading.png",  "image"),
-    "sad":      ("lune_sad.png",      "image"),
-    "confused": ("lune_confused.png", "image"),
-    "error":    ("lune_error.png",    "image"),
+        fg, bg = BADGE_COLORS.get(cmd.badge, BADGE_COLORS["unknown"])
+        badge = QLabel(cmd.badge)
+        badge.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        badge.setFixedHeight(20)
+        badge.setStyleSheet(
+            f"color:{fg};background:{bg};border-radius:4px;padding:0 6px;"
+        )
+        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        layout.addWidget(ts)
+        layout.addWidget(txt, 1)
+        layout.addWidget(badge)
+
+# ─── Widget de cara ───────────────────────────────────────────────────────────
+FACE_DIR = Path(__file__).parent / "ardo_faces"
+
+FACE_VIDEOS = {
+    "pensando":   "aldo_pensando.mp4",
+    "ejecutando": "aldo_ejecutando_comando.mp4",
+    "esperando":  "aldo_esperando.mp4",
+}
+FACE_FALLBACK = {
+    "pensando":   "◎",
+    "ejecutando": "▶",
+    "esperando":  "○",
 }
 
-FACE_FALLBACK_IMAGE = {
-    "thinking": "lune_thinking.png",
-    "typing":   "lune_typing.png",
-}
-
-EMOTION_KEYWORDS = {
-    "happy":   ["encendida","apagada","abriendo","cerrando","en marcha","detenido","entendido","listo"],
-    "error":   ["❌","error:","no se pudo","falló","timeout","sin respuesta"],
-    "sad":     ["no entendí","no pude","desconectado"],
-    "confused":["no entendí","no comprendo","ambiguo"],
-}
-
-def detect_emotion(text: str) -> str:
-    tl = text.lower()
-    if any(k in tl for k in EMOTION_KEYWORDS["error"]):    return "error"
-    if any(k in tl for k in EMOTION_KEYWORDS["sad"]):      return "sad"
-    if any(k in tl for k in EMOTION_KEYWORDS["confused"]): return "confused"
-    if any(k in tl for k in EMOTION_KEYWORDS["happy"]):    return "happy"
-    return "normal"
-
-def get_face_info(state: str) -> tuple:
-    entry = FACE_FILES.get(state, FACE_FILES["normal"])
-    filename, kind = entry
-    path = FACE_DIR / filename
-    if path.exists(): return str(path), kind
-    if kind == "video" and state in FACE_FALLBACK_IMAGE:
-        fallback = FACE_DIR / FACE_FALLBACK_IMAGE[state]
-        if fallback.exists(): return str(fallback), "image"
-    return None, "image"
-
-
-class LuneFaceWidget(QFrame):
+class FaceWidget(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedSize(196, 260)
-        self.setStyleSheet("QFrame { background: transparent; border: none; }")
-        self._current_state = "normal"
-
+        self.setFixedSize(186, 200)
+        self.setStyleSheet(
+            f"QFrame{{background:{C['surface3']};border-radius:16px;border:none;}}"
+        )
+        self._state = "esperando"
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
-        self.image_label = QLabel()
-        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image_label.setScaledContents(False)
-        self.image_label.setStyleSheet("background: transparent; border: none;")
-        layout.addWidget(self.image_label)
 
         if _MULTIMEDIA_OK:
-            self.video_widget = QVideoWidget()
-            self.video_widget.setFixedSize(190, 250)
-            self.video_widget.setStyleSheet("background: transparent; border: none;")
-            self.video_widget.hide()
-            layout.addWidget(self.video_widget)
+            self.vid = QVideoWidget()
+            self.vid.setFixedSize(186, 200)
+            self.vid.setStyleSheet("background:transparent;border:none;")
+            layout.addWidget(self.vid)
             self._player = QMediaPlayer()
             self._audio  = QAudioOutput()
             self._audio.setVolume(0)
             self._player.setAudioOutput(self._audio)
-            self._player.setVideoOutput(self.video_widget)
-            self._player.mediaStatusChanged.connect(self._on_media_status)
+            self._player.setVideoOutput(self.vid)
+            self._player.mediaStatusChanged.connect(self._loop)
         else:
-            self.video_widget = None
-            self._player = None
+            self.vid, self._player = None, None
 
-        self._fallback_label = QLabel("🤖")
-        self._fallback_label.setFont(QFont("Segoe UI Emoji", 64))
-        self._fallback_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._fallback_label.setStyleSheet("background: transparent; border: none;")
-        self._fallback_label.hide()
-        layout.addWidget(self._fallback_label)
+        self._fallback = QLabel("○")
+        self._fallback.setFont(QFont("Segoe UI Symbol", 56))
+        self._fallback.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._fallback.setStyleSheet("background:transparent;border:none;")
+        if _MULTIMEDIA_OK:
+            self._fallback.hide()
+        layout.addWidget(self._fallback)
 
-        self._revert_timer = QTimer(self)
-        self._revert_timer.setSingleShot(True)
-        self._revert_timer.timeout.connect(lambda: self.set_state("normal"))
-        self._load_face("normal")
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(lambda: self.set_state("esperando"))
+        self._load("esperando")
 
-    def _on_media_status(self, status):
+    def _loop(self, status):
         if self._player and status == QMediaPlayer.MediaStatus.EndOfMedia:
-            self._player.setPosition(0)
-            self._player.play()
+            self._player.setPosition(0); self._player.play()
 
-    def _stop_video(self):
-        if self._player: self._player.stop()
-        if self.video_widget: self.video_widget.hide()
-
-    def _load_face(self, state: str):
-        path, kind = get_face_info(state)
-        self._stop_video()
-        if path and kind == "video" and _MULTIMEDIA_OK and self._player:
-            self.image_label.hide()
-            self._fallback_label.hide()
-            self.video_widget.show()
-            self._player.setSource(QUrl.fromLocalFile(path))
+    def _load(self, state: str):
+        fname = FACE_VIDEOS.get(state, FACE_VIDEOS["esperando"])
+        path  = FACE_DIR / fname
+        if self._player:
+            self._player.stop()
+        if path.exists() and _MULTIMEDIA_OK and self._player:
+            self._fallback.hide(); self.vid.show()
+            self._player.setSource(QUrl.fromLocalFile(str(path)))
             self._player.play()
             return
-        if path and kind == "image":
-            pixmap = QPixmap(path)
-            if not pixmap.isNull():
-                scaled = pixmap.scaled(190, 250,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation)
-                self.image_label.setPixmap(scaled)
-                self.image_label.show()
-                self._fallback_label.hide()
-                return
-        fallback_emojis = {
-            "normal":"🤖","happy":"😊","thinking":"🤔","typing":"⌨️",
-            "reading":"📖","sad":"😔","confused":"😕","error":"❌"
-        }
-        self._fallback_label.setText(fallback_emojis.get(state, "🤖"))
-        self._fallback_label.show()
-        self.image_label.hide()
+        self._fallback.setText(FACE_FALLBACK.get(state, "○"))
+        if self.vid: self.vid.hide()
+        self._fallback.show()
 
-    def set_state(self, state: str, auto_revert_ms: int = 0):
-        if state == self._current_state: return
-        self._current_state = state
-        self._load_face(state)
-        if auto_revert_ms > 0:
-            self._revert_timer.start(auto_revert_ms)
+    def set_state(self, state: str, ms: int = 0):
+        if state != self._state:
+            self._state = state
+            self._load(state)
+        if ms > 0:
+            self._timer.start(ms)
         else:
-            self._revert_timer.stop()
-
+            self._timer.stop()
 
 # ─── Voz ──────────────────────────────────────────────────────────────────────
 class VoiceEngine:
     def __init__(self):
-        self._enabled = False
-        self._lock = threading.Lock()
-        self._engine = None
-        self._init_engine()
-
-    def _init_engine(self):
-        try:
-            import edge_tts, pygame
-            pygame.mixer.init()
-            self._engine = "edge"
-            return
-        except ImportError:
-            pass
-        try:
-            from gtts import gTTS
-            import pygame
-            pygame.mixer.init()
-            self._engine = "gtts"
-            return
-        except ImportError:
-            pass
-        self._engine = None
+        self._enabled = False; self._lock = threading.Lock(); self._engine = None
+        for eng, test in [("edge", "import edge_tts, pygame; pygame.mixer.init()"),
+                          ("gtts", "from gtts import gTTS; import pygame; pygame.mixer.init()")]:
+            try: exec(test); self._engine = eng; break
+            except ImportError: pass
 
     def speak(self, text: str):
         if not self._enabled or not self._engine: return
-        clean = re.sub(r'[^\w\s,.!?áéíóúüñ¿¡`]', '', text, flags=re.UNICODE).strip()[:400]
-        if clean:
-            threading.Thread(target=self._speak_blocking, args=(clean,), daemon=True).start()
+        clean = re.sub(r'[^\w\s,.!?áéíóúüñ`]', '', text, flags=re.UNICODE).strip()[:300]
+        if clean: threading.Thread(target=self._run, args=(clean,), daemon=True).start()
 
-    def _speak_blocking(self, text: str):
+    def _run(self, text):
         with self._lock:
-            if self._engine == "edge":   self._speak_edge(text)
-            elif self._engine == "gtts": self._speak_gtts(text)
+            try:
+                if self._engine == "edge":
+                    import asyncio, edge_tts, pygame, tempfile
+                    async def _s():
+                        c = edge_tts.Communicate(text, voice="es-MX-DaliaNeural")
+                        t = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False); t.close()
+                        await c.save(t.name); return t.name
+                    p = asyncio.run(_s()); pygame.mixer.music.load(p); pygame.mixer.music.play()
+                    while pygame.mixer.music.get_busy(): threading.Event().wait(0.1)
+                    os.unlink(p)
+                else:
+                    from gtts import gTTS; import pygame
+                    fp = io.BytesIO(); gTTS(text, lang="es").write_to_fp(fp); fp.seek(0)
+                    pygame.mixer.music.load(fp); pygame.mixer.music.play()
+                    while pygame.mixer.music.get_busy(): threading.Event().wait(0.1)
+            except Exception: pass
 
-    def _speak_edge(self, text: str):
-        try:
-            import asyncio, edge_tts, pygame, tempfile
-            async def _synth():
-                c = edge_tts.Communicate(text, voice="es-MX-DaliaNeural")
-                t = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
-                t.close()
-                await c.save(t.name)
-                return t.name
-            path = asyncio.run(_synth())
-            pygame.mixer.music.load(path)
-            pygame.mixer.music.play()
-            while pygame.mixer.music.get_busy(): threading.Event().wait(0.1)
-            os.unlink(path)
-        except Exception: pass
-
-    def _speak_gtts(self, text: str):
-        try:
-            from gtts import gTTS
-            import pygame
-            tts = gTTS(text, lang="es")
-            fp = io.BytesIO()
-            tts.write_to_fp(fp)
-            fp.seek(0)
-            pygame.mixer.music.load(fp)
-            pygame.mixer.music.play()
-            while pygame.mixer.music.get_busy(): threading.Event().wait(0.1)
-        except Exception: pass
-
-    def toggle(self) -> bool:
-        self._enabled = not self._enabled
-        return self._enabled
-
+    def toggle(self) -> bool: self._enabled = not self._enabled; return self._enabled
     @property
     def available(self): return self._engine is not None
-    @property
-    def engine_name(self): return self._engine or "sin voz"
-
-
-# ─── Widgets de chat ──────────────────────────────────────────────────────────
-class ProviderTab(QFrame):
-    clicked = pyqtSignal(str)
-
-    def __init__(self, provider_id, meta, parent=None):
-        super().__init__(parent)
-        self.provider_id = provider_id
-        self.meta = meta
-        self._active = False
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedHeight(64)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(14, 8, 14, 8)
-        layout.setSpacing(10)
-        self.icon_lbl = QLabel(self.meta["icon"])
-        self.icon_lbl.setFont(QFont("Segoe UI Emoji", 18))
-        self.icon_lbl.setFixedWidth(30)
-        self.icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        text_col = QVBoxLayout()
-        text_col.setSpacing(1)
-        self.name_lbl = QLabel(self.meta["label"])
-        self.name_lbl.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
-        self.desc_lbl = QLabel(self.meta["desc"])
-        self.desc_lbl.setFont(QFont("Segoe UI", 9))
-        text_col.addWidget(self.name_lbl)
-        text_col.addWidget(self.desc_lbl)
-        layout.addWidget(self.icon_lbl)
-        layout.addLayout(text_col, 1)
-        self._apply_style(False)
-
-    def _apply_style(self, active):
-        c, d = self.meta["color"], self.meta["dark"]
-        if active:
-            self.setStyleSheet(
-                f"ProviderTab {{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
-                f"stop:0 {d}88,stop:1 {d}22);border-left:3px solid {c};border-radius:10px;}}"
-            )
-            self.name_lbl.setStyleSheet(f"color:{c};background:transparent;")
-            self.desc_lbl.setStyleSheet(f"color:{c}aa;background:transparent;")
-        else:
-            self.setStyleSheet(
-                f"ProviderTab {{background:transparent;border-left:3px solid transparent;"
-                f"border-radius:10px;}}ProviderTab:hover{{background:{COLORS['surface2']};}}"
-            )
-            self.name_lbl.setStyleSheet(f"color:{COLORS['text']};background:transparent;")
-            self.desc_lbl.setStyleSheet(f"color:{COLORS['text_muted']};background:transparent;")
-        self.icon_lbl.setStyleSheet("background:transparent;")
-
-    def set_active(self, active):
-        self._active = active
-        self._apply_style(active)
-
-    def mousePressEvent(self, event):
-        self.clicked.emit(self.provider_id)
-
-
-class MessageBubble(QFrame):
-    def __init__(self, text, is_user, provider_id="tiny_nlu", parent=None):
-        super().__init__(parent)
-        self.is_user = is_user
-        self.provider_id = provider_id
-        self._build(text)
-
-    def _build(self, text):
-        outer = QHBoxLayout(self)
-        outer.setContentsMargins(12, 4, 12, 4)
-        outer.setSpacing(10)
-        meta  = PROVIDER_META.get(self.provider_id, PROVIDER_META["tiny_nlu"])
-        color = meta["color"]
-
-        if self.is_user:
-            outer.addStretch()
-            bubble = QFrame()
-            bubble.setStyleSheet(
-                f"QFrame{{background:{COLORS['user_bubble']};border-radius:16px;"
-                f"border-bottom-right-radius:4px;border:1px solid {COLORS['border2']};}}"
-            )
-            bl = QVBoxLayout(bubble)
-            bl.setContentsMargins(14, 10, 14, 10)
-            bl.setSpacing(4)
-            self.text_lbl = QLabel(text)
-            self.text_lbl.setWordWrap(True)
-            self.text_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            self.text_lbl.setFont(QFont("Segoe UI", 11))
-            self.text_lbl.setStyleSheet(f"color:{COLORS['text']};background:transparent;")
-            self.text_lbl.setMaximumWidth(520)
-            bl.addWidget(self.text_lbl)
-            ts = QLabel(datetime.now().strftime("%H:%M"))
-            ts.setFont(QFont("Segoe UI", 8))
-            ts.setStyleSheet(f"color:{COLORS['text_dim']};background:transparent;")
-            ts.setAlignment(Qt.AlignmentFlag.AlignRight)
-            bl.addWidget(ts)
-            outer.addWidget(bubble)
-        else:
-            avatar = QLabel(meta["icon"])
-            avatar.setFixedSize(36, 36)
-            avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            avatar.setFont(QFont("Segoe UI Emoji", 15))
-            avatar.setStyleSheet(
-                f"background:qlineargradient(x1:0,y1:0,x2:1,y2:1,"
-                f"stop:0 {meta['dark']},stop:1 {color}44);"
-                f"border-radius:10px;border:1px solid {color}55;"
-            )
-            outer.addWidget(avatar, 0, Qt.AlignmentFlag.AlignTop)
-            bubble = QFrame()
-            bubble.setStyleSheet(
-                f"QFrame{{background:{COLORS['bot_bubble']};border-radius:16px;"
-                f"border-top-left-radius:4px;border:1px solid {COLORS['border']};}}"
-            )
-            bl = QVBoxLayout(bubble)
-            bl.setContentsMargins(14, 10, 14, 10)
-            bl.setSpacing(4)
-            sender = QLabel(meta["label"])
-            sender.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
-            sender.setStyleSheet(f"color:{color};background:transparent;")
-            bl.addWidget(sender)
-            self.text_lbl = QLabel(text)
-            self.text_lbl.setWordWrap(True)
-            self.text_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            self.text_lbl.setFont(QFont("Segoe UI", 11))
-            self.text_lbl.setStyleSheet(f"color:{COLORS['text']};background:transparent;")
-            self.text_lbl.setMaximumWidth(520)
-            bl.addWidget(self.text_lbl)
-            ts = QLabel(datetime.now().strftime("%H:%M"))
-            ts.setFont(QFont("Segoe UI", 8))
-            ts.setStyleSheet(f"color:{COLORS['text_dim']};background:transparent;")
-            bl.addWidget(ts)
-            outer.addWidget(bubble)
-            outer.addStretch()
-
-    def update_text(self, text):
-        self.text_lbl.setText(text)
-
-
-class TypingIndicator(QFrame):
-    def __init__(self, provider_id="tiny_nlu", parent=None):
-        super().__init__(parent)
-        meta = PROVIDER_META.get(provider_id, PROVIDER_META["tiny_nlu"])
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 4, 12, 4)
-        layout.setSpacing(10)
-        avatar = QLabel(meta["icon"])
-        avatar.setFixedSize(36, 36)
-        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        avatar.setFont(QFont("Segoe UI Emoji", 15))
-        avatar.setStyleSheet(
-            f"background:qlineargradient(x1:0,y1:0,x2:1,y2:1,"
-            f"stop:0 {meta['dark']},stop:1 {meta['color']}44);"
-            f"border-radius:10px;border:1px solid {meta['color']}55;"
-        )
-        layout.addWidget(avatar, 0, Qt.AlignmentFlag.AlignTop)
-        dots_frame = QFrame()
-        dots_frame.setStyleSheet(
-            f"QFrame{{background:{COLORS['bot_bubble']};border-radius:16px;"
-            f"border-top-left-radius:4px;border:1px solid {COLORS['border']};}}"
-        )
-        dl = QHBoxLayout(dots_frame)
-        dl.setContentsMargins(16, 12, 16, 12)
-        dl.setSpacing(6)
-        self.dots = []
-        for _ in range(3):
-            dot = QLabel("●")
-            dot.setFont(QFont("Segoe UI", 9))
-            dot.setStyleSheet(f"color:{COLORS['text_muted']};background:transparent;")
-            dl.addWidget(dot)
-            self.dots.append(dot)
-        layout.addWidget(dots_frame)
-        layout.addStretch()
-        self._dot_idx = 0
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._animate)
-        self._timer.start(300)
-
-    def _animate(self):
-        c = COLORS["accent"]
-        for i, dot in enumerate(self.dots):
-            dot.setStyleSheet(
-                f"color:{c if i == self._dot_idx else COLORS['text_dim']};background:transparent;"
-            )
-        self._dot_idx = (self._dot_idx + 1) % 3
-
-    def stop(self):
-        self._timer.stop()
-
 
 # ─── AI Worker ────────────────────────────────────────────────────────────────
 class AIWorker(QThread):
-    token_received  = pyqtSignal(str)
-    response_ready  = pyqtSignal(str)
-    error_occurred  = pyqtSignal(str)
+    response_ready = pyqtSignal(str, float)   # response_text, latency_ms
+    error_occurred = pyqtSignal(str)
 
-    def __init__(self, ai_manager, message: str, provider_id: str, extra_context: str = ""):
-        super().__init__()
-        self.ai_manager    = ai_manager
-        self.message       = message
-        self.provider_id   = provider_id
-        self.extra_context = extra_context
-        self._buffer       = ""
+    def __init__(self, ai_manager, message: str):
+        super().__init__(); self.ai = ai_manager; self.msg = message
 
     def run(self):
         try:
-            sys_val = PROVIDER_META[self.provider_id]["system"]
-            system_prompt = sys_val() if callable(sys_val) else sys_val
-
-            def on_token(token):
-                self._buffer += token
-                self.token_received.emit(self._buffer)
-
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+            loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
+            t0 = time.perf_counter()
             try:
-                response = loop.run_until_complete(
-                    self.ai_manager.chat(
-                        self.message, system_prompt,
-                        provider=self.provider_id, on_token=on_token
-                    )
-                )
-            finally:
-                loop.close()
-
-            self.response_ready.emit(response or "Sin respuesta")
+                resp = loop.run_until_complete(self.ai.chat(self.msg, provider="tiny_nlu"))
+            finally: loop.close()
+            ms = (time.perf_counter() - t0) * 1000
+            self.response_ready.emit(resp or "", ms)
         except Exception as e:
-            log_error(f"AIWorker error: {e}")
-            self.error_occurred.emit(str(e))
-
-
-# ─── Panel de configuración ───────────────────────────────────────────────────
-class SettingsPanel(QFrame):
-    saved = pyqtSignal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setStyleSheet("QFrame{background:transparent;}")
-        self._load_datos()
-        self._build()
-
-    def _load_datos(self):
-        try:
-            with open("datos.json", "r", encoding="utf-8") as f:
-                self.datos_data = json.load(f)
-        except Exception:
-            self.datos_data = {"bot":{"personaje_default":"Ardo"},"personajes":[{}]}
-
-    def _build(self):
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet(
-            f"QScrollArea {{border:none;background:transparent;}}"
-            f"QScrollBar:vertical {{background:{COLORS['surface']};width:8px;border-radius:4px;}}"
-            f"QScrollBar::handle:vertical {{background:{COLORS['border2']};border-radius:4px;}}"
-        )
-
-        content = QFrame()
-        layout = QVBoxLayout(content)
-        layout.setContentsMargins(40, 20, 40, 40)
-        layout.setSpacing(25)
-
-        title = QLabel("⚙️  Configuración")
-        title.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
-        title.setStyleSheet(f"color:{COLORS['text']};")
-        layout.addWidget(title)
-
-        self.fields = {}
-
-        # Sección: Personalidad
-        layout.addWidget(self._section_title("🎭 Personalidad del Asistente"))
-        frame_pers = self._group_frame()
-        fl_pers = QVBoxLayout(frame_pers)
-        fl_pers.setSpacing(15)
-
-        personaje = self.datos_data.get("personajes", [{}])[0] if self.datos_data.get("personajes") else {}
-        self._add_input(fl_pers, "bot_nombre", "Nombre del Asistente",
-                        personaje.get("nombre", "Ardo"), False)
-        self._add_textarea(fl_pers, "bot_saludo", "Mensaje de Bienvenida",
-                           personaje.get("fraseInicial", "Hola. ¿Qué quieres controlar?"), 60)
-        layout.addWidget(frame_pers)
-
-        # Botón guardar
-        save_btn = QPushButton("💾  Guardar Configuración")
-        save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        save_btn.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
-        save_btn.setFixedHeight(50)
-        save_btn.setStyleSheet(
-            f"QPushButton{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
-            f"stop:0 {COLORS['accent']},stop:1 {COLORS['accent2']});"
-            f"color:white;border:none;border-radius:12px;margin-top:10px;}}"
-            f"QPushButton:hover{{background:{COLORS['accent2']};}}"
-        )
-        save_btn.clicked.connect(self._save)
-        layout.addWidget(save_btn)
-        layout.addStretch()
-
-        scroll.setWidget(content)
-        main_layout.addWidget(scroll)
-
-    def _section_title(self, text):
-        lbl = QLabel(text)
-        lbl.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
-        lbl.setStyleSheet(f"color:{COLORS['text_muted']};margin-top:10px;")
-        return lbl
-
-    def _group_frame(self):
-        f = QFrame()
-        f.setStyleSheet(
-            f"QFrame{{background:{COLORS['surface']};border-radius:12px;"
-            f"border:1px solid {COLORS['border']};padding:15px;}}"
-        )
-        return f
-
-    def _add_input(self, layout, key, label_text, default_val, is_password):
-        lbl = QLabel(label_text)
-        lbl.setFont(QFont("Segoe UI", 10))
-        lbl.setStyleSheet(f"color:{COLORS['text']};border:none;padding:0;")
-        inp = QLineEdit()
-        inp.setText(default_val)
-        inp.setEchoMode(
-            QLineEdit.EchoMode.Password if is_password else QLineEdit.EchoMode.Normal
-        )
-        inp.setStyleSheet(
-            f"QLineEdit{{background:{COLORS['surface2']};border:1px solid {COLORS['border']};"
-            f"border-radius:8px;padding:10px 12px;color:{COLORS['text']};}}"
-            f"QLineEdit:focus{{border:1px solid {COLORS['accent']};}}"
-        )
-        self.fields[key] = inp
-        layout.addWidget(lbl)
-        layout.addWidget(inp)
-
-    def _add_textarea(self, layout, key, label_text, default_val, height):
-        lbl = QLabel(label_text)
-        lbl.setFont(QFont("Segoe UI", 10))
-        lbl.setStyleSheet(f"color:{COLORS['text']};border:none;padding:0;")
-        txt = QTextEdit()
-        txt.setPlainText(default_val)
-        txt.setFixedHeight(height)
-        txt.setStyleSheet(
-            f"QTextEdit{{background:{COLORS['surface2']};border:1px solid {COLORS['border']};"
-            f"border-radius:8px;padding:10px;color:{COLORS['text']};font-family:'Segoe UI';}}"
-            f"QTextEdit:focus{{border:1px solid {COLORS['accent']};}}"
-        )
-        self.fields[key] = txt
-        layout.addWidget(lbl)
-        layout.addWidget(txt)
-
-    def _save(self):
-        if "bot" not in self.datos_data:
-            self.datos_data["bot"] = {}
-        if not self.datos_data.get("personajes"):
-            self.datos_data["personajes"] = [{}]
-
-        nombre = self.fields["bot_nombre"].text().strip()
-        self.datos_data["bot"]["personaje_default"] = nombre
-        self.datos_data["personajes"][0]["nombre"] = nombre
-        self.datos_data["personajes"][0]["fraseInicial"] = \
-            self.fields["bot_saludo"].toPlainText().strip()
-
-        try:
-            with open("datos.json", "w", encoding="utf-8") as f:
-                json.dump(self.datos_data, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            print(f"Error guardando datos.json: {e}")
-
-        importlib.reload(datos)
-        self.saved.emit()
-
+            log_error(f"AIWorker: {e}"); self.error_occurred.emit(str(e))
 
 # ─── Ventana principal ────────────────────────────────────────────────────────
 class ArdoDesktopWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.ai_manager       = AIManager()
-        self.voice            = VoiceEngine()
-        self.current_provider = "tiny_nlu"
-        self.ai_worker        = None
-        self._current_bubble  = None
-        self._typing_indicator= None
-        self.memoria          = MemoriaManager()
-        self.tools            = ToolManager()
+        self.ai       = AIManager()
+        self.voice    = VoiceEngine()
+        self.memoria  = MemoriaManager()
+        self.tools    = ToolManager()
+        self.devices: List[DeviceState] = [
+            DeviceState(d.id, d.name, d.location, d.dtype, d.icon, d.state, d.value)
+            for d in INITIAL_DEVICES
+        ]
+        self.recent: List[RecentCmd] = []
+        self._latency_ms: float = 0.0
+        self._ai_worker = None
         self._init_ui()
+        self._idle_timer = QTimer(self)
+        self._idle_timer.setSingleShot(True)
+        self._idle_timer.setInterval(8000)
+        self._idle_timer.timeout.connect(lambda: self.face.set_state("esperando"))
+        self._idle_timer.start()
         log_info("Ardo Desktop iniciado")
 
-    # ── UI ─────────────────────────────────────────────────────────────────────
+    # ── UI raíz ────────────────────────────────────────────────────────────────
     def _init_ui(self):
-        self.setWindowTitle("🤖 Ardo Desktop · NLU Local")
-        self.setGeometry(80, 60, 1100, 780)
-        self.setMinimumSize(820, 580)
-        self.setStyleSheet(f"QMainWindow,QWidget{{background:{COLORS['bg']};}}")
+        self.setWindowTitle("Ardo Desktop  ·  NLU Local")
+        self.setGeometry(60, 40, 1180, 820)
+        self.setMinimumSize(900, 620)
+        self.setStyleSheet(f"QMainWindow,QWidget{{background:{C['bg']};}}")
+       
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ardo_faces", "icon.png")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
 
-        central = QWidget()
-        self.setCentralWidget(central)
-        root = QHBoxLayout(central)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
+        
+        central = QWidget(); self.setCentralWidget(central)
+        root = QHBoxLayout(central); root.setContentsMargins(0,0,0,0); root.setSpacing(0)
         root.addWidget(self._build_sidebar())
         root.addWidget(self._build_main(), 1)
+        self._update_status_panel()
 
     # ── Sidebar ────────────────────────────────────────────────────────────────
     def _build_sidebar(self):
-        sidebar = QFrame()
-        sidebar.setFixedWidth(220)
-        sidebar.setStyleSheet(
-            f"QFrame{{background:{COLORS['surface']};border-right:1px solid {COLORS['border']};}}"
-        )
-        layout = QVBoxLayout(sidebar)
-        layout.setContentsMargins(12, 20, 12, 16)
-        layout.setSpacing(4)
+        sb = QFrame(); sb.setFixedWidth(210)
+        sb.setStyleSheet(f"QFrame{{background:{C['surface']};border-right:1px solid {C['border']};}}")
+        lay = QVBoxLayout(sb); lay.setContentsMargins(14, 20, 14, 16); lay.setSpacing(4)
 
         # Logo
-        logo_row = QHBoxLayout()
-        icon = QLabel("🤖")
-        icon.setFont(QFont("Segoe UI Emoji", 22))
-        icon.setStyleSheet("background:transparent;")
-        title = QVBoxLayout()
-        title.setSpacing(0)
-        personaje = datos.get_personaje(datos.get_bot().get("personaje_default", "Ardo"))
-        self.sidebar_t1 = QLabel(personaje.get("nombre", "Ardo"))
-        self.sidebar_t1.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
-        self.sidebar_t1.setStyleSheet(f"color:{COLORS['text']};background:transparent;")
-        t2 = QLabel("NLU Local · Ardo v2")
-        t2.setFont(QFont("Segoe UI", 8))
-        t2.setStyleSheet(f"color:{COLORS['text_muted']};background:transparent;")
-        title.addWidget(self.sidebar_t1)
-        title.addWidget(t2)
-        logo_row.addWidget(icon)
-        logo_row.addLayout(title, 1)
-        layout.addLayout(logo_row)
+        row = QHBoxLayout(); row.setSpacing(8)
+        icon_lbl = QLabel("◈"); icon_lbl.setFont(QFont("Segoe UI Symbol", 18))
+        icon_lbl.setStyleSheet(f"color:{C['teal']};background:transparent;")
+        tc = QVBoxLayout(); tc.setSpacing(0)
+        personaje = datos.get_personaje(datos.get_bot().get("personaje_default","Ardo"))
+        self._name_lbl = QLabel(personaje.get("nombre","Ardo"))
+        self._name_lbl.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
+        self._name_lbl.setStyleSheet(f"color:{C['text']};background:transparent;")
+        sub = QLabel("NLU Local · v2"); sub.setFont(QFont("Segoe UI", 8))
+        sub.setStyleSheet(f"color:{C['muted']};background:transparent;")
+        tc.addWidget(self._name_lbl); tc.addWidget(sub)
+        row.addWidget(icon_lbl); row.addLayout(tc, 1); lay.addLayout(row)
 
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet(f"background:{COLORS['border']};margin:8px 0;")
-        sep.setFixedHeight(1)
-        layout.addWidget(sep)
+        def _sep():
+            s = QFrame(); s.setFrameShape(QFrame.Shape.HLine)
+            s.setStyleSheet(f"background:{C['border']};margin:6px 0;"); s.setFixedHeight(1)
+            return s
 
-        lbl = QLabel("MOTOR DE COMANDOS")
-        lbl.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
-        lbl.setStyleSheet(f"color:{COLORS['text_dim']};background:transparent;padding:4px 4px 4px 6px;")
-        layout.addWidget(lbl)
+        lay.addWidget(_sep())
 
-        self.provider_tabs = {}
-        for pid, meta in PROVIDER_META.items():
-            tab = ProviderTab(pid, meta)
-            tab.clicked.connect(self._switch_provider)
-            self.provider_tabs[pid] = tab
-            layout.addWidget(tab)
-        self.provider_tabs["tiny_nlu"].set_active(True)
+        # Motor de comandos
+        sec = QLabel("MOTOR DE COMANDOS"); sec.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+        sec.setStyleSheet(f"color:{C['dim']};background:transparent;padding:2px 2px 2px 4px;")
+        lay.addWidget(sec)
 
-        layout.addStretch()
+        for name, sub_txt, active in [
+            ("Ardo NLU",     "TinyNLU · ESP32-S3", True),
+            ("Whisper Local","Voz — local",         False),
+            ("Home Bridge",  "MQTT · Zigbee",       False),
+        ]:
+            item = QFrame()
+            item.setStyleSheet(
+                f"QFrame{{background:{'#0d2b22' if active else 'transparent'};"
+                f"border-radius:8px;{'border-left:3px solid '+C['teal']+';' if active else ''}}}"
+            )
+            il = QHBoxLayout(item); il.setContentsMargins(8,6,8,6); il.setSpacing(8)
+            tc2 = QVBoxLayout(); tc2.setSpacing(0)
+            nl = QLabel(name); nl.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold if active else QFont.Weight.Normal))
+            nl.setStyleSheet(f"color:{C['teal'] if active else C['muted']};background:transparent;")
+            sl = QLabel(sub_txt); sl.setFont(QFont("Segoe UI", 8))
+            sl.setStyleSheet(f"color:{C['dim']};background:transparent;")
+            tc2.addWidget(nl); tc2.addWidget(sl); il.addLayout(tc2, 1)
+            if active:
+                badge = QLabel("ON"); badge.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+                badge.setFixedSize(26, 16)
+                badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                badge.setStyleSheet(
+                    f"color:white;background:{C['teal']};border-radius:4px;"
+                )
+                il.addWidget(badge)
+            lay.addWidget(item)
+
+        lay.addStretch()
 
         # Cara
-        self.lune_face = LuneFaceWidget()
-        fc = QHBoxLayout()
-        fc.setContentsMargins(0, 0, 0, 0)
-        fc.addStretch()
-        fc.addWidget(self.lune_face)
-        fc.addStretch()
-        layout.addLayout(fc)
+        self.face = FaceWidget()
+        face_row = QHBoxLayout(); face_row.setContentsMargins(0,0,0,0)
+        face_row.addStretch(); face_row.addWidget(self.face); face_row.addStretch()
+        lay.addLayout(face_row)
 
-        sep2 = QFrame()
-        sep2.setFrameShape(QFrame.Shape.HLine)
-        sep2.setStyleSheet(f"background:{COLORS['border']};margin:4px 0;")
-        sep2.setFixedHeight(1)
-        layout.addWidget(sep2)
+        lay.addSpacing(8)
+
+        # Panel de estado
+        status_frame = QFrame()
+        status_frame.setStyleSheet(
+            f"QFrame{{background:{C['surface2']};border-radius:10px;border:1px solid {C['border']};}}"
+        )
+        sl2 = QVBoxLayout(status_frame); sl2.setContentsMargins(10,8,10,8); sl2.setSpacing(4)
+        self._status_rows = {}
+        for key, label, default_val, default_color in [
+            ("estado",      "Estado",       "En línea",   C["online"]),
+            ("dispositivos","Dispositivos", "0/0 on",     C["text"]),
+            ("latencia",    "Latencia NLU", "— ms",       C["teal"]),
+            ("modo",        "Modo",         "100% offline",C["muted"]),
+        ]:
+            row_w = QHBoxLayout(); row_w.setSpacing(0)
+            k = QLabel(label); k.setFont(QFont("Segoe UI", 8))
+            k.setStyleSheet(f"color:{C['muted']};background:transparent;")
+            v = QLabel(default_val); v.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+            v.setStyleSheet(f"color:{default_color};background:transparent;")
+            v.setAlignment(Qt.AlignmentFlag.AlignRight)
+            row_w.addWidget(k); row_w.addStretch(); row_w.addWidget(v)
+            sl2.addLayout(row_w)
+            self._status_rows[key] = v
+        lay.addWidget(status_frame)
+        lay.addWidget(_sep())
 
         # Botones de acción
-        self._keys_btn = self._sidebar_btn("⚙️", "Configuración")
-        self._keys_btn.clicked.connect(self._toggle_keys_panel)
-        layout.addWidget(self._keys_btn)
-
-        clear_btn = self._sidebar_btn("🗑", "Limpiar chat")
-        clear_btn.clicked.connect(self._clear_chat)
-        layout.addWidget(clear_btn)
-
-        mem_btn = self._sidebar_btn("🧠", "Mi memoria")
-        mem_btn.clicked.connect(self._show_memoria)
-        layout.addWidget(mem_btn)
-
-        tools_btn = self._sidebar_btn("🛠", "Herramientas")
-        tools_btn.clicked.connect(self._show_tools)
-        layout.addWidget(tools_btn)
+        for icon, label, slot in [
+            ("▤", "Memoria",      self._show_memoria),
+            ("◈", "Herramientas", self._show_tools),
+            ("×", "Limpiar",      self._clear_recent),
+        ]:
+            btn = QPushButton(f"  {icon}  {label}")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFont(QFont("Segoe UI", 10)); btn.setFixedHeight(34)
+            btn.setStyleSheet(
+                f"QPushButton{{background:transparent;color:{C['muted']};"
+                f"border:none;border-radius:6px;text-align:left;padding-left:6px;}}"
+                f"QPushButton:hover{{background:{C['surface2']};color:{C['text']};}}"
+            )
+            btn.clicked.connect(slot); lay.addWidget(btn)
 
         if self.voice.available:
-            icon_voz = "🔊" if self.voice.engine_name == "edge" else "🔢"
-            self._voice_btn = self._sidebar_btn(icon_voz, "Voz: OFF")
-            self._voice_btn.clicked.connect(self._toggle_voice)
-            layout.addWidget(self._voice_btn)
+            self._voice_btn = QPushButton("  ▶  Voz: OFF")
+            self._voice_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._voice_btn.setFont(QFont("Segoe UI", 10))
+            self._voice_btn.setFixedHeight(34)
+            self._voice_btn.setStyleSheet(
+                f"QPushButton{{background:transparent;color:{C['muted']};"
+                f"border:none;border-radius:6px;text-align:left;padding-left:6px;}}"
+                f"QPushButton:hover{{background:{C['surface2']};color:{C['text']};}}"
+            )
+            self._voice_btn.clicked.connect(self._toggle_voice); lay.addWidget(self._voice_btn)
 
-        return sidebar
-
-    def _sidebar_btn(self, icon, label):
-        btn = QPushButton(f"  {icon}  {label}")
-        btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setFont(QFont("Segoe UI", 10))
-        btn.setFixedHeight(38)
-        btn.setStyleSheet(
-            f"QPushButton{{background:transparent;color:{COLORS['text_muted']};"
-            f"border:none;border-radius:8px;text-align:left;padding-left:8px;}}"
-            f"QPushButton:hover{{background:{COLORS['surface2']};color:{COLORS['text']};}}"
-        )
-        return btn
-
-    def _show_memoria(self):
-        texto = self.memoria._cmd_listar()
-        bubble = MessageBubble(texto, is_user=False, provider_id=self.current_provider)
-        self.messages_layout.insertWidget(self.messages_layout.count() - 1, bubble)
-        self.lune_face.set_state("reading", auto_revert_ms=5000)
-        self._scroll_bottom()
-
-    def _show_tools(self):
-        texto = self.tools.listar_disponibles()
-        bubble = MessageBubble(texto, is_user=False, provider_id=self.current_provider)
-        self.messages_layout.insertWidget(self.messages_layout.count() - 1, bubble)
-        self.lune_face.set_state("reading", auto_revert_ms=5000)
-        self._scroll_bottom()
+        return sb
 
     # ── Main area ──────────────────────────────────────────────────────────────
     def _build_main(self):
-        main = QFrame()
-        main.setStyleSheet(f"QFrame{{background:{COLORS['bg']};border:none;}}")
-        layout = QVBoxLayout(main)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addWidget(self._build_topbar())
+        main = QFrame(); main.setStyleSheet(f"QFrame{{background:{C['bg']};border:none;}}")
+        lay = QVBoxLayout(main); lay.setContentsMargins(0,0,0,0); lay.setSpacing(0)
+        lay.addWidget(self._build_topbar())
         self.stack = QStackedWidget()
         self.stack.setStyleSheet("QStackedWidget{background:transparent;}")
-        self.stack.addWidget(self._build_chat_page())
-        self.stack.addWidget(self._build_settings_page())
-        layout.addWidget(self.stack, 1)
-        layout.addWidget(self._build_input_bar())
+        self.stack.addWidget(self._build_dashboard_page())   # index 0
+        self.stack.addWidget(self._build_info_page())          # index 1
+        lay.addWidget(self.stack, 1)
+        lay.addWidget(self._build_input_bar())
         return main
 
     def _build_topbar(self):
-        bar = QFrame()
-        bar.setFixedHeight(56)
-        bar.setStyleSheet(
-            f"QFrame{{background:{COLORS['surface']};border-bottom:1px solid {COLORS['border']};}}"
+        bar = QFrame(); bar.setFixedHeight(54)
+        bar.setStyleSheet(f"QFrame{{background:{C['surface']};border-bottom:1px solid {C['border']};}}")
+        lay = QHBoxLayout(bar); lay.setContentsMargins(20,0,20,0)
+
+        icon = QLabel("◈"); icon.setFont(QFont("Segoe UI Symbol", 16))
+        icon.setStyleSheet(f"color:{C['teal']};background:transparent;")
+        title = QLabel("Ardo NLU"); title.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
+        title.setStyleSheet(f"color:{C['teal']};background:transparent;")
+        desc = QLabel("Motor de Comandos Local"); desc.setFont(QFont("Segoe UI", 10))
+        desc.setStyleSheet(f"color:{C['muted']};background:transparent;")
+        esp_badge = QLabel("ESP32-S3"); esp_badge.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        esp_badge.setStyleSheet(
+            f"color:{C['teal']};background:{C['teal_dark']};border-radius:5px;padding:2px 7px;"
         )
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(20, 0, 20, 0)
-        meta = PROVIDER_META[self.current_provider]
-        self.topbar_icon  = QLabel(meta["icon"])
-        self.topbar_icon.setFont(QFont("Segoe UI Emoji", 18))
-        self.topbar_icon.setStyleSheet("background:transparent;")
-        self.topbar_title = QLabel(meta["label"])
-        self.topbar_title.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
-        self.topbar_title.setStyleSheet(f"color:{meta['color']};background:transparent;")
-        self.topbar_desc  = QLabel("·  " + meta["desc"])
-        self.topbar_desc.setFont(QFont("Segoe UI", 10))
-        self.topbar_desc.setStyleSheet(f"color:{COLORS['text_muted']};background:transparent;")
-        layout.addWidget(self.topbar_icon)
-        layout.addSpacing(8)
-        layout.addWidget(self.topbar_title)
-        layout.addWidget(self.topbar_desc)
-        layout.addStretch()
-        self.status_dot   = QLabel("●")
-        self.status_dot.setFont(QFont("Segoe UI", 10))
-        self.status_dot.setStyleSheet(f"color:{COLORS['success']};background:transparent;")
-        self.status_label = QLabel("Listo")
-        self.status_label.setFont(QFont("Segoe UI", 9))
-        self.status_label.setStyleSheet(f"color:{COLORS['text_muted']};background:transparent;")
-        layout.addWidget(self.status_dot)
-        layout.addSpacing(4)
-        layout.addWidget(self.status_label)
+
+        lay.addWidget(icon); lay.addSpacing(8); lay.addWidget(title)
+        lay.addSpacing(8); lay.addWidget(desc); lay.addSpacing(8); lay.addWidget(esp_badge)
+        lay.addStretch()
+
+        self._status_badge = QLabel("● Listo")
+        self._status_badge.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        self._status_badge.setStyleSheet(
+            f"color:{C['online']};background:#0d2a18;border-radius:8px;padding:3px 10px;"
+        )
+        lay.addWidget(self._status_badge)
         return bar
 
-    def _build_chat_page(self):
-        page = QFrame()
-        page.setStyleSheet("QFrame{background:transparent;}")
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        self.scroll = QScrollArea()
-        self.scroll.setStyleSheet(
+    def _build_dashboard_page(self):
+        page = QFrame(); page.setStyleSheet("QFrame{background:transparent;}")
+        lay = QVBoxLayout(page); lay.setContentsMargins(0,0,0,0)
+
+        scroll = QScrollArea(); scroll.setWidgetResizable(True)
+        scroll.setStyleSheet(
             f"QScrollArea{{border:none;background:transparent;}}"
-            f"QScrollBar:vertical{{border:none;background:{COLORS['surface']};width:6px;border-radius:3px;}}"
-            f"QScrollBar::handle:vertical{{background:{COLORS['scrollbar']};border-radius:3px;min-height:20px;}}"
+            f"QScrollBar:vertical{{border:none;background:{C['surface']};width:6px;border-radius:3px;}}"
+            f"QScrollBar::handle:vertical{{background:{C['scroll']};border-radius:3px;min-height:20px;}}"
             f"QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{{height:0;}}"
         )
-        self.scroll.setWidgetResizable(True)
-        self.chat_container = QFrame()
-        self.chat_container.setStyleSheet("QFrame{background:transparent;}")
-        self.messages_layout = QVBoxLayout(self.chat_container)
-        self.messages_layout.setContentsMargins(0, 16, 0, 16)
-        self.messages_layout.setSpacing(6)
-        self.messages_layout.addStretch()
-        self.scroll.setWidget(self.chat_container)
-        layout.addWidget(self.scroll)
-        self._add_welcome()
+        container = QWidget(); container.setStyleSheet("background:transparent;")
+        inner = QVBoxLayout(container); inner.setContentsMargins(20,16,20,16); inner.setSpacing(20)
+
+        # Chips rápidos
+        chips_row = QHBoxLayout(); chips_row.setSpacing(8)
+        for icon, txt in QUICK_COMMANDS:
+            chip = QuickChip(icon, txt)
+            chip.clicked.connect(lambda _, t=txt: self._process_command(t))
+            chips_row.addWidget(chip)
+        chips_row.addStretch()
+        inner.addLayout(chips_row)
+
+        # Dispositivos
+        dev_header = QHBoxLayout()
+        dev_title = QLabel("DISPOSITIVOS DETECTADOS")
+        dev_title.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        dev_title.setStyleSheet(f"color:{C['muted']};background:transparent;")
+        self._dev_count_lbl = QLabel(f"· {len(self.devices)}")
+        self._dev_count_lbl.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        self._dev_count_lbl.setStyleSheet(f"color:{C['teal']};background:transparent;")
+        dev_header.addWidget(dev_title); dev_header.addWidget(self._dev_count_lbl)
+        dev_header.addStretch()
+        inner.addLayout(dev_header)
+
+        self._cards_grid = QGridLayout(); self._cards_grid.setSpacing(10)
+        self._device_cards: dict[str, DeviceCard] = {}
+        for i, dev in enumerate(self.devices):
+            card = DeviceCard(dev)
+            card.toggle_requested.connect(self._on_device_toggled)
+            self._device_cards[dev.id] = card
+            self._cards_grid.addWidget(card, i // 4, i % 4)
+        inner.addLayout(self._cards_grid)
+
+        # Comandos recientes
+        rec_header = QLabel("COMANDOS RECIENTES")
+        rec_header.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        rec_header.setStyleSheet(f"color:{C['muted']};background:transparent;")
+        inner.addWidget(rec_header)
+
+        self._recent_layout = QVBoxLayout(); self._recent_layout.setSpacing(6)
+        placeholder = QLabel("Aún no hay comandos. Escribe uno abajo.")
+        placeholder.setFont(QFont("Segoe UI", 10))
+        placeholder.setStyleSheet(f"color:{C['dim']};background:transparent;padding:10px;")
+        self._recent_layout.addWidget(placeholder)
+        self._recent_placeholder = placeholder
+        inner.addLayout(self._recent_layout)
+        inner.addStretch()
+
+        scroll.setWidget(container)
+        lay.addWidget(scroll)
+        self._dashboard_scroll = scroll
         return page
 
-    def _build_settings_page(self):
-        page = QFrame()
-        page.setStyleSheet("QFrame{background:transparent;}")
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(10, 10, 10, 10)
-        self.settings_panel = SettingsPanel()
-        self.settings_panel.saved.connect(self._on_settings_saved)
-        layout.addWidget(self.settings_panel)
+    def _build_info_page(self):
+        page = QFrame(); page.setStyleSheet("QFrame{background:transparent;}")
+        lay = QVBoxLayout(page); lay.setContentsMargins(20,20,20,20)
+        self._info_lbl = QLabel("")
+        self._info_lbl.setFont(QFont("Segoe UI", 11))
+        self._info_lbl.setWordWrap(True)
+        self._info_lbl.setStyleSheet(
+            f"color:{C['text']};background:{C['surface2']};border-radius:12px;"
+            f"border:1px solid {C['border']};padding:16px;"
+        )
+        self._info_lbl.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        lay.addWidget(self._info_lbl); lay.addStretch()
         return page
 
     def _build_input_bar(self):
-        bar = QFrame()
-        bar.setFixedHeight(76)
+        bar = QFrame(); bar.setFixedHeight(72)
         bar.setStyleSheet(
-            f"QFrame{{background:{COLORS['surface']};border-top:1px solid {COLORS['border']};}}"
+            f"QFrame{{background:{C['surface']};border-top:1px solid {C['border']};}}"
         )
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(20, 14, 20, 14)
-        layout.setSpacing(12)
+        lay = QHBoxLayout(bar); lay.setContentsMargins(20,12,20,8); lay.setSpacing(10)
 
         self.input_field = QLineEdit()
-        self.input_field.setPlaceholderText("Escribe un comando… ej: enciende la luz del cuarto")
-        self.input_field.setFont(QFont("Segoe UI", 11))
-        self.input_field.setFixedHeight(44)
+        self.input_field.setPlaceholderText("Escribe un comando…  ej: enciende la luz del cuarto")
+        self.input_field.setFont(QFont("Segoe UI", 11)); self.input_field.setFixedHeight(42)
         self.input_field.setStyleSheet(
-            f"QLineEdit{{background:{COLORS['surface2']};border:1px solid {COLORS['border2']};"
-            f"border-radius:22px;padding:0 18px;color:{COLORS['text']};}}"
-            f"QLineEdit:focus{{border:1px solid {COLORS['accent']};background:{COLORS['surface3']};}}"
+            f"QLineEdit{{background:{C['surface2']};border:1px solid {C['border2']};"
+            f"border-radius:20px;padding:0 18px;color:{C['text']};}}"
+            f"QLineEdit:focus{{border:1px solid {C['accent']};background:{C['surface3']};}}"
         )
-        self.input_field.returnPressed.connect(self._send_message)
+        self.input_field.returnPressed.connect(self._on_send)
 
-        self.send_btn = QPushButton("➤")
-        self.send_btn.setFixedSize(44, 44)
+        self.send_btn = QPushButton("→")
+        self.send_btn.setFixedSize(42,42)
         self.send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.send_btn.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
-        self._update_send_btn_color()
-        self.send_btn.clicked.connect(self._send_message)
-
-        self.stop_btn = QPushButton("⏹")
-        self.stop_btn.setFixedSize(44, 44)
-        self.stop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.stop_btn.setFont(QFont("Segoe UI", 16))
-        self.stop_btn.setStyleSheet(
-            f"QPushButton{{background:{COLORS['error']};color:white;border:none;border-radius:22px;}}"
-            f"QPushButton:hover{{background:#ff4d4d;}}"
-        )
-        self.stop_btn.clicked.connect(self._stop_generation)
-        self.stop_btn.hide()
-
-        layout.addWidget(self.input_field, 1)
-        layout.addWidget(self.send_btn)
-        layout.addWidget(self.stop_btn)
-        return bar
-
-    def _add_welcome(self):
-        welcome = QFrame()
-        welcome.setStyleSheet("QFrame{background:transparent;}")
-        wl = QVBoxLayout(welcome)
-        wl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        wl.setSpacing(8)
-        icon = QLabel("🤖")
-        icon.setFont(QFont("Segoe UI Emoji", 40))
-        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        icon.setStyleSheet("background:transparent;")
-        personaje = datos.get_personaje(datos.get_bot().get("personaje_default", "Ardo"))
-        self.welcome_t1 = QLabel(personaje.get("nombre", "Ardo"))
-        self.welcome_t1.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
-        self.welcome_t1.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.welcome_t1.setStyleSheet(f"color:{COLORS['text']};background:transparent;")
-        saludo = personaje.get("fraseInicial", "Hola. ¿Qué quieres controlar?")
-        self.welcome_t2 = QLabel(saludo)
-        self.welcome_t2.setFont(QFont("Segoe UI", 11))
-        self.welcome_t2.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.welcome_t2.setStyleSheet(f"color:{COLORS['text_muted']};background:transparent;")
-        sub = QLabel("Motor: TinyNLU · ESP32-S3 Ardo v2 · 100% offline")
-        sub.setFont(QFont("Segoe UI", 9))
-        sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        sub.setStyleSheet(f"color:{COLORS['accent']};background:transparent;")
-        wl.addStretch()
-        wl.addWidget(icon)
-        wl.addWidget(self.welcome_t1)
-        wl.addWidget(self.welcome_t2)
-        wl.addWidget(sub)
-        wl.addStretch()
-        self.messages_layout.insertWidget(0, welcome)
-
-    # ── Lógica de envío ────────────────────────────────────────────────────────
-    def _switch_provider(self, provider_id):
-        if provider_id == self.current_provider: return
-        self.current_provider = provider_id
-        for pid, tab in self.provider_tabs.items():
-            tab.set_active(pid == provider_id)
-        meta = PROVIDER_META[provider_id]
-        self.topbar_icon.setText(meta["icon"])
-        self.topbar_title.setText(meta["label"])
-        self.topbar_title.setStyleSheet(f"color:{meta['color']};background:transparent;")
-        self.topbar_desc.setText("·  " + meta["desc"])
-        self._update_send_btn_color()
-        self.stack.setCurrentIndex(0)
-
-    def _update_send_btn_color(self):
-        c = PROVIDER_META[self.current_provider]["color"]
-        d = PROVIDER_META[self.current_provider]["dark"]
+        self.send_btn.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
         self.send_btn.setStyleSheet(
-            f"QPushButton{{background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 {d},stop:1 {c});"
-            f"color:white;border:none;border-radius:22px;}}"
-            f"QPushButton:hover{{background:{c};}}"
-            f"QPushButton:disabled{{background:{COLORS['surface3']};color:{COLORS['text_dim']};}}"
+            f"QPushButton{{background:{C['accent']};color:white;border:none;border-radius:21px;}}"
+            f"QPushButton:hover{{background:{C['accent2']};}}"
+            f"QPushButton:disabled{{background:{C['border']};color:{C['dim']};}}"
         )
+        self.send_btn.clicked.connect(self._on_send)
 
-    def _stop_generation(self):
-        if self.ai_worker and self.ai_worker.isRunning():
-            if self.current_provider in self.ai_manager.providers:
-                self.ai_manager.providers[self.current_provider].cancel_flag = True
-        self._set_status("Interrumpido", COLORS["warning"])
-        self.lune_face.set_state("normal")
-        self.stop_btn.hide()
-        self.send_btn.show()
-        self.input_field.setEnabled(True)
-        self.input_field.setFocus()
+        shortcuts = QLabel("Enter → enviar")
+        shortcuts.setFont(QFont("Segoe UI", 8))
+        shortcuts.setStyleSheet(f"color:{C['dim']};background:transparent;")
 
-    def _send_message(self):
+        self._lat_lbl = QLabel("—  ms")
+        self._lat_lbl.setFont(QFont("Segoe UI", 8))
+        self._lat_lbl.setStyleSheet(f"color:{C['teal']};background:transparent;")
+
+        lay.addWidget(self.input_field, 1)
+        lay.addWidget(self.send_btn)
+
+        bot_row = QHBoxLayout()
+        bot_row.addWidget(shortcuts); bot_row.addStretch(); bot_row.addWidget(self._lat_lbl)
+
+        wrapper = QVBoxLayout(); wrapper.setContentsMargins(0,0,0,0); wrapper.setSpacing(2)
+        input_row = QHBoxLayout()
+        input_row.addWidget(self.input_field, 1); input_row.addWidget(self.send_btn)
+
+        bar_inner = QFrame(); bar_inner.setStyleSheet("background:transparent;border:none;")
+        bi_lay = QVBoxLayout(bar_inner); bi_lay.setContentsMargins(0,0,0,0); bi_lay.setSpacing(3)
+        bi_lay.addLayout(input_row); bi_lay.addLayout(bot_row)
+
+        # Re-build the bar layout properly
+        for i in reversed(range(lay.count())): lay.itemAt(i).widget() and lay.itemAt(i).widget().deleteLater()
+        # Just use a simple single-level layout
+        bar2 = QFrame(); bar2.setFixedHeight(72)
+        bar2.setStyleSheet(
+            f"QFrame{{background:{C['surface']};border-top:1px solid {C['border']};}}"
+        )
+        b2l = QVBoxLayout(bar2); b2l.setContentsMargins(20,10,20,6); b2l.setSpacing(3)
+        row1 = QHBoxLayout(); row1.setSpacing(10)
+        row1.addWidget(self.input_field, 1); row1.addWidget(self.send_btn)
+        row2 = QHBoxLayout()
+        row2.addWidget(shortcuts); row2.addStretch(); row2.addWidget(self._lat_lbl)
+        b2l.addLayout(row1); b2l.addLayout(row2)
+        return bar2
+
+    # ── Lógica de comandos ─────────────────────────────────────────────────────
+    def _on_send(self):
         text = self.input_field.text().strip()
         if not text: return
-        self.stack.setCurrentIndex(0)
-
-        bubble = MessageBubble(text, is_user=True, provider_id=self.current_provider)
-        self.messages_layout.insertWidget(self.messages_layout.count() - 1, bubble)
         self.input_field.clear()
+        self._process_command(text)
 
-        # Memoria
-        respuesta_memoria = self.memoria.procesar_mensaje_usuario(text)
-        if respuesta_memoria:
-            bot_bubble = MessageBubble(respuesta_memoria, is_user=False,
-                                       provider_id=self.current_provider)
-            self.messages_layout.insertWidget(self.messages_layout.count() - 1, bot_bubble)
-            self.lune_face.set_state("happy", auto_revert_ms=4000)
-            self._scroll_bottom()
+    def _process_command(self, text: str):
+        self.stack.setCurrentIndex(0)
+        self._idle_timer.stop()
+        self.face.set_state("pensando")
+        self._set_status("Procesando…", C["warning"])
+        self.input_field.setEnabled(False); self.send_btn.setEnabled(False)
+
+        # Herramientas locales (búsqueda web, control de luces, etc.)
+        tool = self.tools.detectar_y_ejecutar(text)
+        if tool:
+            self._add_recent(text, "device.on" if tool.ok else "unknown", "TOOL")
+            self.face.set_state("ejecutando", ms=4000)
+            self._set_status("Listo", C["online"])
+            self._info_lbl.setText(tool.mensaje)
+            self.stack.setCurrentIndex(1)
+            self._idle_timer.start()
+            self.input_field.setEnabled(True)
+            self.send_btn.setEnabled(True)
             return
 
-        # Herramientas locales
-        tool_result = self.tools.detectar_y_ejecutar(text)
-        if tool_result:
-            icono = "✅" if tool_result.ok else "❌"
-            msg = f"{icono} {tool_result.mensaje}"
-            bot_bubble = MessageBubble(msg, is_user=False, provider_id=self.current_provider)
-            self.messages_layout.insertWidget(self.messages_layout.count() - 1, bot_bubble)
-            self.lune_face.set_state("happy" if tool_result.ok else "error", auto_revert_ms=5000)
-            self._scroll_bottom()
+        self._ai_worker = AIWorker(self.ai, text)
+        self._ai_worker.response_ready.connect(self._on_response)
+        self._ai_worker.error_occurred.connect(self._on_error)
+        self._ai_worker.start()
+        self._pending_text = text
+
+    def _on_response(self, _response: str, latency_ms: float):
+        from tiny_nlu_provider import nlu_process
+        result = nlu_process(self._pending_text)
+        apply_nlu(result, self.devices)
+        badge  = intent_to_badge(result["intent"])
+
+        self._add_recent(self._pending_text, badge, result["intent"])
+        self._refresh_device_cards()
+        self._update_status_panel()
+
+        self._latency_ms = latency_ms
+        self._lat_lbl.setText(f"~{latency_ms:.0f} ms  ·  {result['confidence']:.0%} conf")
+        self._status_rows["latencia"].setText(f"~{latency_ms:.0f} ms")
+
+        is_iot = result["intent"] not in ("UNKNOWN",)
+        self.face.set_state("ejecutando" if is_iot else "pensando", ms=5000)
+        self._idle_timer.start()
+        self._set_status("Listo", C["online"])
+        self.voice.speak(result["response"])
+        self.input_field.setEnabled(True); self.send_btn.setEnabled(True)
+
+    def _on_error(self, _error: str):
+        self._add_recent("Error de procesamiento", "unknown", "ERROR")
+        self.face.set_state("esperando")
+        self._idle_timer.start()
+        self._set_status("Error", C["error"])
+        self.input_field.setEnabled(True); self.send_btn.setEnabled(True)
+
+    def _add_recent(self, text: str, badge: str, intent: str):
+        cmd = RecentCmd(ts=datetime.now().strftime("%H:%M"), text=text,
+                        badge=badge, intent=intent)
+        self.recent.insert(0, cmd)
+        if len(self.recent) > 20: self.recent.pop()
+        self._refresh_recent_list()
+
+    def _refresh_recent_list(self):
+        while self._recent_layout.count():
+            item = self._recent_layout.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+        if not self.recent:
+            self._recent_layout.addWidget(self._recent_placeholder)
             return
+        for cmd in self.recent[:10]:
+            self._recent_layout.addWidget(RecentRow(cmd))
 
-        self.input_field.setEnabled(False)
-        self.send_btn.hide()
-        self.stop_btn.show()
-        if self.current_provider in self.ai_manager.providers:
-            self.ai_manager.providers[self.current_provider].cancel_flag = False
+    def _refresh_device_cards(self):
+        for dev in self.devices:
+            if dev.id in self._device_cards:
+                self._device_cards[dev.id].update_device(dev)
 
-        self._set_status("Procesando…", COLORS["warning"])
-        self.lune_face.set_state("thinking")
+    def _on_device_toggled(self, device_id: str, new_state: bool):
+        for dev in self.devices:
+            if dev.id == device_id: dev.state = new_state; break
+        self._refresh_device_cards()
+        self._update_status_panel()
 
-        self._typing_indicator = TypingIndicator(self.current_provider)
-        self.messages_layout.insertWidget(self.messages_layout.count() - 1, self._typing_indicator)
-        self._scroll_bottom()
+    def _update_status_panel(self):
+        on_count = sum(1 for d in self.devices if d.state)
+        total = len(self.devices)
+        self._status_rows["dispositivos"].setText(f"{on_count}/{total} on")
+        self._dev_count_lbl.setText(f"· {total}")
 
-        contexto = self.memoria.obtener_contexto_para_prompt()
-        self.ai_worker = AIWorker(self.ai_manager, text, self.current_provider, contexto)
-        self.ai_worker.token_received.connect(self._on_token)
-        self.ai_worker.response_ready.connect(self._on_response)
-        self.ai_worker.error_occurred.connect(self._on_error)
-        self.ai_worker.start()
-
-    def _on_token(self, partial):
-        if self._typing_indicator and self._current_bubble is None:
-            self._typing_indicator.stop()
-            self._typing_indicator.deleteLater()
-            self._typing_indicator = None
-            self._current_bubble = MessageBubble(
-                partial + " ▋", is_user=False, provider_id=self.current_provider
-            )
-            self.messages_layout.insertWidget(
-                self.messages_layout.count() - 1, self._current_bubble
-            )
-            self.lune_face.set_state("typing")
-        elif self._current_bubble:
-            self._current_bubble.update_text(partial + " ▋")
-        self._scroll_bottom()
-
-    def _on_response(self, response):
-        respuesta_limpia, acciones_ia = self.tools.parsear_respuesta_ia(response)
-
-        if self._current_bubble:
-            self._current_bubble.update_text(respuesta_limpia)
-        if self._typing_indicator:
-            self._typing_indicator.stop()
-            self._typing_indicator.deleteLater()
-            self._typing_indicator = None
-        self._current_bubble = None
-
-        self.stop_btn.hide()
-        self.send_btn.show()
-        self._set_status("Listo", COLORS["success"])
-        self.input_field.setEnabled(True)
-        self.input_field.setFocus()
-
-        for accion in acciones_ia:
-            herramienta = accion.pop("herramienta", None)
-            if herramienta:
-                result = self.tools.ejecutar(herramienta, **accion)
-                tool_bubble = MessageBubble(
-                    f"{'✅' if result.ok else '❌'} {result.mensaje}",
-                    is_user=False, provider_id=self.current_provider
-                )
-                self.messages_layout.insertWidget(
-                    self.messages_layout.count() - 1, tool_bubble
-                )
-
-        self.memoria.procesar_respuesta_lune(respuesta_limpia)
-        emotion = detect_emotion(respuesta_limpia)
-        self.lune_face.set_state(emotion, auto_revert_ms=6000)
-        self.voice.speak(respuesta_limpia)
-        self._scroll_bottom()
-
-    def _on_error(self, error):
-        if self._typing_indicator:
-            self._typing_indicator.stop()
-            self._typing_indicator.deleteLater()
-            self._typing_indicator = None
-        if self._current_bubble:
-            self._current_bubble.update_text(f"❌ {error}")
-        else:
-            err_bubble = MessageBubble(
-                f"❌ {error}", is_user=False, provider_id=self.current_provider
-            )
-            self.messages_layout.insertWidget(self.messages_layout.count() - 1, err_bubble)
-        self._current_bubble = None
-        self.stop_btn.hide()
-        self.send_btn.show()
-        self._set_status("Error", COLORS["error"])
-        self.input_field.setEnabled(True)
-        self.input_field.setFocus()
-        self.lune_face.set_state("error", auto_revert_ms=8000)
-        self._scroll_bottom()
-
-    # ── Helpers ────────────────────────────────────────────────────────────────
-    def _scroll_bottom(self):
-        QTimer.singleShot(60, lambda:
-            self.scroll.verticalScrollBar().setValue(
-                self.scroll.verticalScrollBar().maximum()
-            )
+    def _set_status(self, text: str, color: str):
+        icon = "●" if color == C["online"] else ("◌" if color == C["warning"] else "✕")
+        self._status_badge.setText(f"{icon} {text}")
+        self._status_badge.setStyleSheet(
+            f"color:{color};background:{'#0d2a18' if color==C['online'] else C['surface2']};"
+            f"border-radius:8px;padding:3px 10px;"
         )
 
-    def _set_status(self, text, color):
-        self.status_label.setText(text)
-        self.status_dot.setStyleSheet(f"color:{color};background:transparent;")
+    # ── Botones sidebar ────────────────────────────────────────────────────────
+    def _show_memoria(self):
+        self._info_lbl.setText(self.memoria._cmd_listar())
+        self.stack.setCurrentIndex(1)
+
+    def _show_tools(self):
+        self._info_lbl.setText(self.tools.listar_disponibles())
+        self.stack.setCurrentIndex(1)
+
+    def _clear_recent(self):
+        self.recent.clear(); self._refresh_recent_list()
 
     def _toggle_voice(self):
-        enabled = self.voice.toggle()
-        icon_voz = "🔊" if self.voice.engine_name == "edge" else "🔢"
-        self._voice_btn.setText(f"  {icon_voz}  Voz: {'ON' if enabled else 'OFF'}")
-
-    def _toggle_keys_panel(self):
-        self.stack.setCurrentIndex(1 if self.stack.currentIndex() == 0 else 0)
-
-    def _on_settings_saved(self):
-        self.ai_manager.reload_provider()
-        self.stack.setCurrentIndex(0)
-        personaje = datos.get_personaje(datos.get_bot().get("personaje_default", "Ardo"))
-        self.sidebar_t1.setText(personaje.get("nombre", "Ardo"))
-        if hasattr(self, "welcome_t1"):
-            self.welcome_t1.setText(personaje.get("nombre", "Ardo"))
-            self.welcome_t2.setText(personaje.get("fraseInicial", "¿Qué quieres controlar?"))
-        QMessageBox.information(self, "✅ Guardado", "Configuración guardada.")
-
-    def _clear_chat(self):
-        reply = QMessageBox.question(
-            self, "Limpiar chat", "¿Eliminar todos los mensajes?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            while self.messages_layout.count() > 1:
-                item = self.messages_layout.takeAt(0)
-                if item.widget(): item.widget().deleteLater()
-            self.ai_manager.clear_history()
-            self._add_welcome()
-            self.lune_face.set_state("normal")
+        on = self.voice.toggle()
+        self._voice_btn.setText(f"  ▶  Voz: {'ON' if on else 'OFF'}")
 
     def closeEvent(self, event):
         if hasattr(self, "memoria"):
-            stats   = self.memoria.get_stats()
-            resumen = (f"Sesión del {datetime.now().strftime('%d/%m/%Y')}. "
-                       f"Mensajes intercambiados hoy: {stats.get('total_mensajes', 0)}.")
-            self.memoria.cerrar_sesion(resumen)
-        if hasattr(self, "lune_face") and self.lune_face._player:
-            self.lune_face._player.stop()
+            stats = self.memoria.get_stats()
+            self.memoria.cerrar_sesion(
+                f"Sesión del {datetime.now().strftime('%d/%m/%Y')}. "
+                f"Mensajes: {stats.get('total_mensajes',0)}."
+            )
+        if hasattr(self, "face") and self.face._player:
+            self.face._player.stop()
         event.accept()
 
 
@@ -1186,24 +917,18 @@ class ArdoDesktopWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Ardo Desktop")
-
     try:
         import ctypes
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("ArdoDesktop.v1")
-    except Exception:
-        pass
-
-    palette = QPalette()
-    palette.setColor(QPalette.ColorRole.Window,     QColor(COLORS["bg"]))
-    palette.setColor(QPalette.ColorRole.WindowText, QColor(COLORS["text"]))
-    palette.setColor(QPalette.ColorRole.Base,       QColor(COLORS["surface"]))
-    palette.setColor(QPalette.ColorRole.Text,       QColor(COLORS["text"]))
-    app.setPalette(palette)
-
-    window = ArdoDesktopWindow()
-    window.show()
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("ArdoDesktop.v2")
+    except Exception: pass
+    p = QPalette()
+    p.setColor(QPalette.ColorRole.Window,     QColor(C["bg"]))
+    p.setColor(QPalette.ColorRole.WindowText, QColor(C["text"]))
+    p.setColor(QPalette.ColorRole.Base,       QColor(C["surface"]))
+    p.setColor(QPalette.ColorRole.Text,       QColor(C["text"]))
+    app.setPalette(p)
+    w = ArdoDesktopWindow(); w.show()
     sys.exit(app.exec())
-
 
 if __name__ == "__main__":
     main()
