@@ -99,14 +99,17 @@ INITIAL_DEVICES: List[DeviceState] = [
 def intent_to_badge(intent: str) -> str:
     on_intents  = {"LIGHT_ON","DOOR_OPEN","TV_ON","ROBOT_START","CURTAIN_OPEN"}
     off_intents = {"LIGHT_OFF","DOOR_CLOSE","TV_OFF","ROBOT_STOP","CURTAIN_CLOSE"}
-    if intent in on_intents:   return "device.on"
-    if intent in off_intents:  return "device.off"
-    if intent == "THERMOSTAT": return "device.set"
-    if intent == "EMERGENCY":  return "emergency"
+    if intent in on_intents:        return "device.on"
+    if intent in off_intents:       return "device.off"
+    if intent == "THERMOSTAT":      return "device.set"
+    if intent == "EMERGENCY":       return "emergency"
+    if intent.startswith("CHAT_"):  return "chat"
     return "unknown"
 
 def apply_nlu(result: dict, devices: List[DeviceState]):
     intent, target = result["intent"], result["target"]
+    if intent.startswith("CHAT_"):
+        return
     for d in devices:
         if intent == "LIGHT_ON":
             if d.id == "light_main"    and target in ("MAIN","ALL"):  d.state = True
@@ -262,6 +265,7 @@ BADGE_COLORS = {
     "device.off": (C["muted"],   C["surface3"]),
     "device.set": (C["purple"],  "#2a2060"),
     "emergency":  (C["error"],   "#3a0808"),
+    "chat":       (C["accent2"], C["accent_dark"]),
     "unknown":    (C["dim"],     C["surface2"]),
 }
 
@@ -422,7 +426,7 @@ class AIWorker(QThread):
             loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
             t0 = time.perf_counter()
             try:
-                resp = loop.run_until_complete(self.ai.chat(self.msg, provider="tiny_nlu"))
+                resp = loop.run_until_complete(self.ai.chat(self.msg, provider="auto"))
             finally: loop.close()
             ms = (time.perf_counter() - t0) * 1000
             self.response_ready.emit(resp or "", ms)
@@ -450,6 +454,8 @@ class ArdoDesktopWindow(QMainWindow):
         self._idle_timer.setInterval(8000)
         self._idle_timer.timeout.connect(lambda: self.face.set_state("esperando"))
         self._idle_timer.start()
+        # Verificar conectividad a Ollama y HA tras 2 s (la UI ya está visible)
+        QTimer.singleShot(2000, self._check_connections)
         log_info("Ardo Desktop iniciado")
 
     # ── UI raíz ────────────────────────────────────────────────────────────────
@@ -502,10 +508,11 @@ class ArdoDesktopWindow(QMainWindow):
         sec.setStyleSheet(f"color:{C['dim']};background:transparent;padding:2px 2px 2px 4px;")
         lay.addWidget(sec)
 
-        for name, sub_txt, active in [
-            ("Ardo NLU",     "TinyNLU · ESP32-S3", True),
-            ("Whisper Local","Voz — local",         False),
-            ("Home Bridge",  "MQTT · Zigbee",       False),
+        self._sidebar_badges: dict = {}
+        for key, name, sub_txt, active in [
+            ("nlu", "Ardo NLU",        "TinyNLU · ESP32-S3",        True),
+            ("llm", "Ollama LLM",      "qwen2.5:7b · 192.168.12.1", False),
+            ("ha",  "Home Assistant",  "192.168.12.1:8123",          False),
         ]:
             item = QFrame()
             item.setStyleSheet(
@@ -519,14 +526,15 @@ class ArdoDesktopWindow(QMainWindow):
             sl = QLabel(sub_txt); sl.setFont(QFont("Segoe UI", 8))
             sl.setStyleSheet(f"color:{C['dim']};background:transparent;")
             tc2.addWidget(nl); tc2.addWidget(sl); il.addLayout(tc2, 1)
-            if active:
-                badge = QLabel("ON"); badge.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
-                badge.setFixedSize(26, 16)
-                badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                badge.setStyleSheet(
-                    f"color:white;background:{C['teal']};border-radius:4px;"
-                )
-                il.addWidget(badge)
+            badge = QLabel("ON" if active else "…")
+            badge.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+            badge.setFixedSize(26, 16)
+            badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            badge.setStyleSheet(
+                f"color:white;background:{C['teal'] if active else C['dim']};border-radius:4px;"
+            )
+            il.addWidget(badge)
+            self._sidebar_badges[key] = badge
             lay.addWidget(item)
 
         lay.addStretch()
@@ -812,7 +820,7 @@ class ArdoDesktopWindow(QMainWindow):
         self._ai_worker.start()
         self._pending_text = text
 
-    def _on_response(self, _response: str, latency_ms: float):
+    def _on_response(self, ai_response: str, latency_ms: float):
         from tiny_nlu_provider import nlu_process
         result = nlu_process(self._pending_text)
         apply_nlu(result, self.devices)
@@ -826,11 +834,23 @@ class ArdoDesktopWindow(QMainWindow):
         self._lat_lbl.setText(f"~{latency_ms:.0f} ms  ·  {result['confidence']:.0%} conf")
         self._status_rows["latencia"].setText(f"~{latency_ms:.0f} ms")
 
-        is_iot = result["intent"] not in ("UNKNOWN",)
+        is_iot = result["intent"] not in ("UNKNOWN",) and not result["intent"].startswith("CHAT_")
         self.face.set_state("ejecutando" if is_iot else "pensando", ms=5000)
         self._idle_timer.start()
         self._set_status("Listo", C["online"])
-        self.voice.speak(result["response"])
+
+        # Para UNKNOWN el AIWorker ya llamó a Ollama; usar esa respuesta en TTS
+        speak_text = ai_response if result["intent"] == "UNKNOWN" else result["response"]
+        self.voice.speak(speak_text)
+
+        # Llamar HA bridge en hilo de fondo para no bloquear la UI
+        if is_iot:
+            threading.Thread(
+                target=self._execute_ha_command,
+                args=(result["intent"], result["target"]),
+                daemon=True,
+            ).start()
+
         self.input_field.setEnabled(True); self.send_btn.setEnabled(True)
 
     def _on_error(self, _error: str):
@@ -861,6 +881,30 @@ class ArdoDesktopWindow(QMainWindow):
         for dev in self.devices:
             if dev.id in self._device_cards:
                 self._device_cards[dev.id].update_device(dev)
+
+    def _execute_ha_command(self, intent: str, target: str):
+        """Llama al HA bridge en un hilo de fondo para no bloquear la UI."""
+        from ha_bridge import execute_nlu_command
+        ok = execute_nlu_command(intent, target)
+        log_info(f"[HA] {intent}/{target} → {'OK' if ok else 'FAIL'}")
+
+    def _check_connections(self):
+        """Comprueba Ollama y HA en background; actualiza badges del sidebar."""
+        def _check():
+            from ha_bridge import is_connected as ha_ok
+            ha_up     = ha_ok()
+            ollama_up = self.ai.ollama_available()
+            # Actualizar UI desde el hilo principal vía QTimer
+            QTimer.singleShot(0, lambda: self._apply_connection_status(ollama_up, ha_up))
+        threading.Thread(target=_check, daemon=True).start()
+
+    def _apply_connection_status(self, ollama_up: bool, ha_up: bool):
+        for key, up in [("llm", ollama_up), ("ha", ha_up)]:
+            badge = self._sidebar_badges.get(key)
+            if badge:
+                badge.setText("ON" if up else "OFF")
+                color = C["teal"] if up else C["error"]
+                badge.setStyleSheet(f"color:white;background:{color};border-radius:4px;")
 
     def _on_device_toggled(self, device_id: str, new_state: bool):
         for dev in self.devices:

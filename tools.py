@@ -8,7 +8,7 @@ import re
 import subprocess
 import urllib.parse
 import webbrowser
-from typing import List, Dict, Tuple, Optional
+from typing import Dict, Optional
 import sys
 
 try:
@@ -126,47 +126,6 @@ class ToolManager:
                 return self._cmd_apagar_luz("light.sala")
 
         return None
-
-    def parsear_respuesta_ia(self, respuesta: str) -> Tuple[str, List[Dict]]:
-        acciones = []
-        respuesta_limpia = respuesta
-
-        match_search = re.search(r'ABRIR_BUSQUEDA:(.+?)(?:\n|$)', respuesta_limpia)
-        if match_search:
-            query = match_search.group(1).strip()
-            respuesta_limpia = respuesta_limpia.replace(match_search.group(0), "").strip()
-            acciones.append({"herramienta": "buscar_web", "args": query})
-
-        match_url = re.search(r'ABRIR_URL:(https?://\S+)', respuesta_limpia)
-        if match_url:
-            url = match_url.group(1).strip()
-            respuesta_limpia = respuesta_limpia.replace(match_url.group(0), "").strip()
-            acciones.append({"herramienta": "abrir_url", "args": url})
-
-        for linea in respuesta_limpia.split("\n"):
-            if linea.strip().startswith("TOOL:"):
-                try:
-                    comando = linea.replace("TOOL:", "").strip()
-                    partes  = comando.split(":", 1)
-                    nombre  = partes[0].strip()
-                    args    = partes[1].strip() if len(partes) > 1 else ""
-                    if nombre in self._tools:
-                        acciones.append({"herramienta": nombre, "args": args})
-                        respuesta_limpia = respuesta_limpia.replace(linea, "").strip()
-                except Exception:
-                    pass
-
-        return respuesta_limpia, acciones
-
-    def ejecutar(self, herramienta: str, **kwargs) -> ToolResult:
-        if herramienta not in self._tools:
-            return ToolResult(False, f"Herramienta '{herramienta}' no disponible.")
-        try:
-            func = self._tools[herramienta]
-            args = kwargs.get("args", "")
-            return func(args) if args else func()
-        except Exception as e:
-            return ToolResult(False, f"Error en {herramienta}: {str(e)}")
 
     def _cmd_buscar_web(self, query: str) -> ToolResult:
         url = f"https://www.google.com/search?q={urllib.parse.quote(query)}"

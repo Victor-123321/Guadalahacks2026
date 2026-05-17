@@ -10,5 +10,28 @@
     "paths": {
         "cache": "./cache",
         "logs": "./logs"
+    },
+    "home_assistant": {
+        "url": "http://192.168.12.1:8123",
+        "token": "TU_TOKEN_LARGA_DURACION_AQUI",
+        "enabled": true,
+        "entities": {
+            "light_main":    "light.sala",
+            "light_bedroom": "light.cuarto",
+            "light_kitchen": "light.cocina",
+            "door_main":     "cover.puerta_principal",
+            "door_back":     "cover.puerta_trasera",
+            "curtain_main":  "cover.cortinas",
+            "robot":         "vacuum.robot_aspiradora",
+            "tv":            "switch.television",
+            "emergency":     "script.alerta_emergencia"
+        }
+    },
+    "ollama": {
+        "host": "http://192.168.12.1:8080",
+        "model": "qwen2.5:7b",
+        "enabled": true,
+        "timeout": 30,
+        "num_ctx": 2048
     }
 }
