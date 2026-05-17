@@ -1,0 +1,12 @@
+# Ardo Desktop — dependencias GUI
+# Instalar con: pip install -r requirements_gui.txt
+
+# Interfaz gráfica
+PyQt6>=6.6.0
+
+# Voz (opcional — instalar al menos uno)
+# pip install edge-tts pygame    <- recomendado
+# pip install gtts pygame        <- alternativa
+
+# Info del sistema (opcional)
+psutil>=5.9.0

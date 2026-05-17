@@ -1,0 +1,14 @@
+{
+  "usuario": {
+    "nombre": null,
+    "preferencias": [],
+    "contexto": ""
+  },
+  "recuerdos": [],
+  "resumen_sesion_anterior": "",
+  "estadisticas": {
+    "total_mensajes": 1,
+    "primera_sesion": "2026-05-16T19:13:30.370147",
+    "ultima_sesion": "2026-05-16T19:13:30.370157"
+  }
+}
