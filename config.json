@@ -1,0 +1,14 @@
+{
+    "ui": {
+        "theme": "dark",
+        "language": "es",
+        "window_width": 1100,
+        "window_height": 780,
+        "always_on_top": false,
+        "font_size": 13
+    },
+    "paths": {
+        "cache": "./cache",
+        "logs": "./logs"
+    }
+}

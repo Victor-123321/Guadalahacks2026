@@ -1,0 +1,14 @@
+{
+  "bot": {
+    "personaje_default": "Ardo",
+    "max_historial": 20
+  },
+  "personajes": [
+    {
+      "nombre": "Ardo",
+      "descripcion": "Asistente de domótica por voz para personas con discapacidad motriz.",
+      "systemPrompt": "",
+      "fraseInicial": "Hola. ¿Qué quieres controlar hoy?"
+    }
+  ]
+}
