@@ -64,6 +64,38 @@ _KW_TABLE = [
     ("sube",       "CURTAIN_OPEN",  0.5),
     ("baja",       "CURTAIN_CLOSE", 0.5),
     ("cierra la cortina", "CURTAIN_CLOSE", 1.0),
+    # ─── Conversacional ───────────────────────────────────────────────────────
+    # Saludos
+    ("hola",           "CHAT_GREETING",     1.0),
+    ("buenos días",    "CHAT_GREETING",     0.9), ("buenos dias",   "CHAT_GREETING",     0.9),
+    ("buenas tardes",  "CHAT_GREETING",     0.9), ("buenas noches", "CHAT_GREETING",     0.9),
+    ("buenas",         "CHAT_GREETING",     0.7), ("hey",           "CHAT_GREETING",     0.8),
+    ("saludos",        "CHAT_GREETING",     0.9), ("qué tal",       "CHAT_GREETING",     0.7),
+    ("que tal",        "CHAT_GREETING",     0.7),
+    # Identidad
+    ("quien eres",     "CHAT_IDENTITY",     1.0), ("quién eres",    "CHAT_IDENTITY",     1.0),
+    ("qué eres",       "CHAT_IDENTITY",     1.0), ("que eres",      "CHAT_IDENTITY",     1.0),
+    ("tu nombre",      "CHAT_IDENTITY",     0.9), ("cómo te llamas","CHAT_IDENTITY",     1.0),
+    ("como te llamas", "CHAT_IDENTITY",     1.0), ("preséntate",    "CHAT_IDENTITY",     1.0),
+    ("presentate",     "CHAT_IDENTITY",     1.0),
+    # Capacidades
+    ("qué puedes",     "CHAT_CAPABILITIES", 1.0), ("que puedes",    "CHAT_CAPABILITIES", 1.0),
+    ("para qué sirves","CHAT_CAPABILITIES", 1.0), ("para que sirves","CHAT_CAPABILITIES",1.0),
+    ("qué haces",      "CHAT_CAPABILITIES", 1.0), ("que haces",     "CHAT_CAPABILITIES", 1.0),
+    ("tus funciones",  "CHAT_CAPABILITIES", 0.9), ("tus capacidades","CHAT_CAPABILITIES",0.9),
+    # Comandos
+    ("comandos",       "CHAT_COMMANDS",     1.0), ("instrucciones", "CHAT_COMMANDS",     0.9),
+    ("cómo te uso",    "CHAT_COMMANDS",     1.0), ("como te uso",   "CHAT_COMMANDS",     1.0),
+    ("cómo funciona",  "CHAT_COMMANDS",     0.9), ("como funciona", "CHAT_COMMANDS",     0.9),
+    ("qué órdenes",    "CHAT_COMMANDS",     1.0), ("que ordenes",   "CHAT_COMMANDS",     1.0),
+    # Estado del sistema
+    ("cómo estás",     "CHAT_STATUS",       1.0), ("como estas",    "CHAT_STATUS",       0.9),
+    ("cómo vas",       "CHAT_STATUS",       0.8), ("como vas",      "CHAT_STATUS",       0.8),
+    # Despedida
+    ("adiós",          "CHAT_FAREWELL",     1.0), ("adios",         "CHAT_FAREWELL",     1.0),
+    ("hasta luego",    "CHAT_FAREWELL",     1.0), ("hasta pronto",  "CHAT_FAREWELL",     1.0),
+    ("chau",           "CHAT_FAREWELL",     0.9), ("bye",           "CHAT_FAREWELL",     0.9),
+    ("nos vemos",      "CHAT_FAREWELL",     0.9),
 ]
 
 _TARGET_TABLE = [
@@ -97,31 +129,54 @@ _RESP_TABLE = {
     ("CURTAIN_OPEN","MAIN"):    "Abriendo cortinas",
     ("CURTAIN_CLOSE","MAIN"):   "Cerrando cortinas",
     ("UNKNOWN",     "MAIN"):    "No entendí el comando",
+    # Conversacional
+    ("CHAT_GREETING",     "MAIN"): "Sistemas principales activos. ARDO a su servicio.",
+    ("CHAT_IDENTITY",     "MAIN"): "Soy ARDO — Asistente Robótico Domótico Operacional. Control domótico local, sin APIs externas ni conexión a internet.",
+    ("CHAT_CAPABILITIES", "MAIN"): "Controlo iluminación, puertas, persianas, robot aspiradora, televisión y alertas de emergencia. Todo procesado localmente en tiempo real.",
+    ("CHAT_COMMANDS",     "MAIN"): (
+        "Comandos disponibles:\n"
+        "💡 Luces: enciende/apaga la luz [del cuarto / cocina / todas]\n"
+        "🔓 Puertas: abre/cierra la puerta [trasera]\n"
+        "🤖 Robot: pon a limpiar el robot / para la aspiradora\n"
+        "📺 TV: enciende/apaga la televisión\n"
+        "🪟 Cortinas: sube/baja las cortinas\n"
+        "🚨 Emergencia: ayuda / socorro / me caí"
+    ),
+    ("CHAT_STATUS",       "MAIN"): "Motor NLU operativo. Procesamiento local activo. Sin errores detectados.",
+    ("CHAT_FAREWELL",     "MAIN"): "Sesión registrada. ARDO en modo espera.",
 }
 
 _PRIORITIES = {
     "LIGHT_ON":3,"LIGHT_OFF":3,"DOOR_OPEN":2,"DOOR_CLOSE":2,
     "ROBOT_START":3,"ROBOT_STOP":3,"EMERGENCY":1,"TV_ON":3,
-    "TV_OFF":3,"CURTAIN_OPEN":3,"CURTAIN_CLOSE":3,"UNKNOWN":3
+    "TV_OFF":3,"CURTAIN_OPEN":3,"CURTAIN_CLOSE":3,"UNKNOWN":3,
+    "CHAT_GREETING":3,"CHAT_IDENTITY":3,"CHAT_CAPABILITIES":3,
+    "CHAT_COMMANDS":3,"CHAT_STATUS":3,"CHAT_FAREWELL":3,
 }
 _ACTIONS = {
     "LIGHT_ON":"on","LIGHT_OFF":"off","DOOR_OPEN":"open",
     "DOOR_CLOSE":"close","ROBOT_START":"move","ROBOT_STOP":"stop",
     "EMERGENCY":"alert","TV_ON":"on","TV_OFF":"off",
-    "CURTAIN_OPEN":"open","CURTAIN_CLOSE":"close","UNKNOWN":"noop"
+    "CURTAIN_OPEN":"open","CURTAIN_CLOSE":"close","UNKNOWN":"noop",
+    "CHAT_GREETING":"noop","CHAT_IDENTITY":"noop","CHAT_CAPABILITIES":"noop",
+    "CHAT_COMMANDS":"noop","CHAT_STATUS":"noop","CHAT_FAREWELL":"noop",
 }
 _TARGET_IDS = {
     "LIGHT_ON":"light_main","LIGHT_OFF":"light_main",
     "DOOR_OPEN":"door_main","DOOR_CLOSE":"door_main",
     "ROBOT_START":"robot_vacuum","ROBOT_STOP":"robot_vacuum",
     "EMERGENCY":"alert_buzzer","TV_ON":"tv_main","TV_OFF":"tv_main",
-    "CURTAIN_OPEN":"curtain_main","CURTAIN_CLOSE":"curtain_main","UNKNOWN":"none"
+    "CURTAIN_OPEN":"curtain_main","CURTAIN_CLOSE":"curtain_main","UNKNOWN":"none",
+    "CHAT_GREETING":"none","CHAT_IDENTITY":"none","CHAT_CAPABILITIES":"none",
+    "CHAT_COMMANDS":"none","CHAT_STATUS":"none","CHAT_FAREWELL":"none",
 }
 
 _INTENT_ICONS = {
     "LIGHT_ON":"💡","LIGHT_OFF":"🌑","DOOR_OPEN":"🔓","DOOR_CLOSE":"🔒",
     "ROBOT_START":"🤖","ROBOT_STOP":"⏹","EMERGENCY":"🚨","TV_ON":"📺",
-    "TV_OFF":"📴","CURTAIN_OPEN":"🪟","CURTAIN_CLOSE":"🪟","UNKNOWN":"❓"
+    "TV_OFF":"📴","CURTAIN_OPEN":"🪟","CURTAIN_CLOSE":"🪟","UNKNOWN":"❓",
+    "CHAT_GREETING":"👋","CHAT_IDENTITY":"🤖","CHAT_CAPABILITIES":"⚡",
+    "CHAT_COMMANDS":"📋","CHAT_STATUS":"✅","CHAT_FAREWELL":"👋",
 }
 
 _HELP_MSG = (
@@ -256,7 +311,8 @@ class TinyNLUProvider(AIProvider):
     def _format(self, result: dict) -> str:
         if result["intent"] == "UNKNOWN":
             return _HELP_MSG
-
+        if result["intent"].startswith("CHAT_"):
+            return result["response"]
         icon  = _INTENT_ICONS.get(result["intent"], "✓")
         conf  = result["confidence"]
         bars  = "▓" * int(conf * 10) + "░" * (10 - int(conf * 10))
