@@ -1,5 +1,0 @@
-## Los tres componentes principales son locales (components/).
-## Solo mantenemos los sub-deps aquí para que el component
-## manager los descargue si faltan.
-dependencies:
-  idf: ">=5.0.0"
