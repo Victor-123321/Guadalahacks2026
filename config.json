@@ -39,9 +39,14 @@
         "timeout": 30,
         "num_ctx": 2048
     },
-    "device_bridge": {
+    "tcp_audio": {
         "enabled": true,
         "host": "0.0.0.0",
         "port": 7111
+    },
+    "device_bridge": {
+        "enabled": true,
+        "host": "0.0.0.0",
+        "port": 7112
     }
 }

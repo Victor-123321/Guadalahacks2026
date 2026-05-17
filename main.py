@@ -34,6 +34,7 @@ from tts import ArdoTTS
 from voice_listener import VoiceListener
 from ha_watcher import HAWatcher
 from device_bridge import DeviceBridgeServer, get_local_ip, EVENT_TO_COMMAND
+from tcp_audio_receiver import TCPAudioReceiver
 
 logger = Logger()
 
@@ -524,6 +525,15 @@ class ArdoDesktopWindow(QMainWindow):
         self._esp_bridge.data_received.connect(self._on_device_data)
         self._esp_bridge.event_received.connect(self._on_device_event)
         self._esp_bridge.start()
+
+        # Receptor de audio TCP desde ESP32 (wake word → PCM-16 → Whisper STT)
+        self._tcp_audio = TCPAudioReceiver()
+        self._tcp_audio.transcription_ready.connect(self._on_voice_transcription)
+        self._tcp_audio.recording_started.connect(self._on_esp32_recording_start)
+        self._tcp_audio.recording_stopped.connect(self._on_esp32_recording_stop)
+        self._tcp_audio.error_occurred.connect(self._on_voice_error)
+        self._tcp_audio.start()
+
         QTimer.singleShot(800, self._update_esp_badge)
 
         log_info("Ardo Desktop iniciado")
@@ -999,12 +1009,24 @@ class ArdoDesktopWindow(QMainWindow):
 
     # ── ESP32 Bridge ───────────────────────────────────────────────────────────
     def _update_esp_badge(self):
-        """Muestra IP:puerto del bridge en el panel de estado."""
-        addr = self._esp_bridge.address()
+        """Muestra IP y puertos activos en el panel de estado."""
+        ip = get_local_ip()
+        tcp_port  = self._tcp_audio._port  if hasattr(self, "_tcp_audio")  else 7111
+        http_port = self._esp_bridge._port if hasattr(self, "_esp_bridge") else 7112
         lbl = self._status_rows.get("esp32")
         if lbl:
-            lbl.setText(addr)
+            lbl.setText(f"{ip}  :{tcp_port}/{http_port}")
             lbl.setStyleSheet(f"color:{C['teal']};background:transparent;")
+
+    def _on_esp32_recording_start(self):
+        """ESP32 conectó y está transmitiendo audio — barge-in y estado grabando."""
+        self.voice.stop()
+        self.face.set_state("pensando")
+        self._set_status("Grabando…  (ESP32)", C["teal"])
+
+    def _on_esp32_recording_stop(self):
+        """ESP32 terminó de transmitir — esperando transcripción."""
+        self._set_status("Transcribiendo…", C["warning"])
 
     def _on_esp_command(self, text: str):
         """Texto natural enviado por el ESP32 → pipeline completo (igual que escribir en UI)."""
@@ -1132,6 +1154,8 @@ class ArdoDesktopWindow(QMainWindow):
         self._voice_btn.setText(f"  ▶  Voz: {'ON' if on else 'OFF'}")
 
     def closeEvent(self, event):
+        if hasattr(self, "_tcp_audio"):
+            self._tcp_audio.stop()
         if hasattr(self, "_esp_bridge"):
             self._esp_bridge.stop()
         if hasattr(self, "_ha_watcher"):
