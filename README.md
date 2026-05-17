@@ -116,6 +116,9 @@ El `.gitignore` excluye automaticamente:
 - archivos de audio generados como `*.wav` y `*.mp3`
 - caches locales
 
+## MicroWakeWord
+- `https://github.com/Sesgaro/Hey_ardo_mww/`
+
 ## Licencia
 
 MIT - 2026 Guadalahacks
